@@ -93,8 +93,21 @@ fi
 
 PORT="$(node -e "const c=require(process.argv[1]); process.stdout.write(String(c.port || 3002))" "${REMOTE_CONFIG_PATH}")"
 BIND_HOST="$(node -e "const c=require(process.argv[1]); process.stdout.write(String(c.bindHost || '127.0.0.1'))" "${REMOTE_CONFIG_PATH}")"
-curl --fail --silent --show-error "http://${BIND_HOST}:${PORT}/health"
-echo
+HEALTH_URL="http://${BIND_HOST}:${PORT}/health"
+HEALTH_OK=0
+for attempt in {1..15}; do
+  if HEALTH_RESPONSE="$(curl --fail --silent "${HEALTH_URL}" 2>/dev/null)"; then
+    printf '%s\n' "${HEALTH_RESPONSE}"
+    HEALTH_OK=1
+    break
+  fi
+  sleep 1
+done
+[[ "${HEALTH_OK}" == "1" ]] || {
+  echo "ERROR: health check failed after 15 seconds: ${HEALTH_URL}" >&2
+  curl --fail --silent --show-error "${HEALTH_URL}" >&2 || true
+  exit 1
+}
 REMOTE_SCRIPT
 
 echo "Server update completed"

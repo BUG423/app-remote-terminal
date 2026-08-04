@@ -54,6 +54,8 @@ test('部署脚本保留外置配置并复用现有进程管理器', () => {
   assert(source.includes('pm2 describe remote-terminal-server'));
   assert(source.indexOf('systemctl cat "${SERVER_SERVICE}"') < source.indexOf('pm2 describe remote-terminal-server'));
   assert(!source.includes('CW_CONFIG_PATH="${REMOTE_DIR}/config.json"'));
+  assert(source.includes('for attempt in {1..15}'));
+  assert(source.includes('health check failed after 15 seconds'));
 });
 
 test('浏览器入口只引用 Server 本地依赖', () => {
