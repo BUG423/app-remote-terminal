@@ -10,6 +10,8 @@ SERVER_USER="${SERVER_USER:-root}"
 SERVER_SSH_PORT="${SERVER_SSH_PORT:-22}"
 REMOTE_DIR="${REMOTE_DIR:-/opt/remote-terminal}"
 DEPLOY_BRANCH="${DEPLOY_BRANCH:-main}"
+REMOTE_CONFIG_PATH="${REMOTE_CONFIG_PATH:-${REMOTE_DIR}/config.json}"
+SERVER_SERVICE="${SERVER_SERVICE:-remote-terminal-server.service}"
 
 fail() {
   echo "ERROR: $*" >&2
@@ -23,29 +25,34 @@ fail() {
 [[ "${REMOTE_DIR}" =~ ^/[A-Za-z0-9._/-]+$ ]] || fail "REMOTE_DIR must be a simple absolute path"
 [[ ! "${REMOTE_DIR}" =~ ^/(|root|home|opt|usr|var)$ ]] || fail "REMOTE_DIR is too broad"
 [[ "${DEPLOY_BRANCH}" =~ ^[A-Za-z0-9._/-]+$ ]] || fail "invalid DEPLOY_BRANCH"
+[[ "${REMOTE_CONFIG_PATH}" =~ ^/[A-Za-z0-9._/-]+$ ]] || fail "REMOTE_CONFIG_PATH must be a simple absolute path"
+[[ "${SERVER_SERVICE}" =~ ^[A-Za-z0-9_.@-]+$ ]] || fail "invalid SERVER_SERVICE"
 
 SSH=(ssh -o StrictHostKeyChecking=accept-new -p "${SERVER_SSH_PORT}")
 TARGET="${SERVER_USER}@${SERVER_HOST}"
 
 echo "Updating ${TARGET}:${REMOTE_DIR} from origin/${DEPLOY_BRANCH}"
 
-"${SSH[@]}" "${TARGET}" bash -s -- "${REMOTE_DIR}" "${DEPLOY_BRANCH}" <<'REMOTE_SCRIPT'
+"${SSH[@]}" "${TARGET}" bash -s -- \
+  "${REMOTE_DIR}" "${DEPLOY_BRANCH}" "${REMOTE_CONFIG_PATH}" "${SERVER_SERVICE}" <<'REMOTE_SCRIPT'
 set -euo pipefail
 
 REMOTE_DIR="$1"
 DEPLOY_BRANCH="$2"
+REMOTE_CONFIG_PATH="$3"
+SERVER_SERVICE="$4"
 
 [[ -d "${REMOTE_DIR}/.git" ]] || {
   echo "ERROR: ${REMOTE_DIR} is not an existing Git checkout" >&2
   exit 1
 }
-[[ -f "${REMOTE_DIR}/config.json" ]] || {
-  echo "ERROR: ${REMOTE_DIR}/config.json is missing; create it on the server" >&2
+[[ -f "${REMOTE_CONFIG_PATH}" ]] || {
+  echo "ERROR: ${REMOTE_CONFIG_PATH} is missing; create it on the server" >&2
   exit 1
 }
 command -v node >/dev/null || { echo "ERROR: node is not installed" >&2; exit 1; }
 command -v npm >/dev/null || { echo "ERROR: npm is not installed" >&2; exit 1; }
-command -v pm2 >/dev/null || { echo "ERROR: pm2 is not installed" >&2; exit 1; }
+command -v curl >/dev/null || { echo "ERROR: curl is not installed" >&2; exit 1; }
 
 cd "${REMOTE_DIR}"
 CURRENT_BRANCH="$(git symbolic-ref --quiet --short HEAD || true)"
@@ -64,16 +71,28 @@ git merge --ff-only "origin/${DEPLOY_BRANCH}"
 cd server
 npm ci --omit=dev --no-audit --no-fund
 
-if pm2 describe remote-terminal-server >/dev/null 2>&1; then
-  CW_CONFIG_PATH="${REMOTE_DIR}/config.json" pm2 reload remote-terminal-server --update-env
+if command -v systemctl >/dev/null && systemctl cat "${SERVER_SERVICE}" >/dev/null 2>&1; then
+  systemctl restart "${SERVER_SERVICE}"
+  systemctl is-active --quiet "${SERVER_SERVICE}" || {
+    systemctl status "${SERVER_SERVICE}" --no-pager >&2 || true
+    exit 1
+  }
 else
-  CW_CONFIG_PATH="${REMOTE_DIR}/config.json" pm2 start index.js \
-    --name remote-terminal-server --cwd "${REMOTE_DIR}/server"
+  command -v pm2 >/dev/null || {
+    echo "ERROR: neither ${SERVER_SERVICE} nor pm2 is available" >&2
+    exit 1
+  }
+  if pm2 describe remote-terminal-server >/dev/null 2>&1; then
+    CW_CONFIG_PATH="${REMOTE_CONFIG_PATH}" pm2 reload remote-terminal-server --update-env
+  else
+    CW_CONFIG_PATH="${REMOTE_CONFIG_PATH}" pm2 start index.js \
+      --name remote-terminal-server --cwd "${REMOTE_DIR}/server"
+  fi
+  pm2 save
 fi
-pm2 save
 
-PORT="$(node -e "const c=require('${REMOTE_DIR}/config.json'); process.stdout.write(String(c.port || 3002))")"
-BIND_HOST="$(node -e "const c=require('${REMOTE_DIR}/config.json'); process.stdout.write(String(c.bindHost || '127.0.0.1'))")"
+PORT="$(node -e "const c=require(process.argv[1]); process.stdout.write(String(c.port || 3002))" "${REMOTE_CONFIG_PATH}")"
+BIND_HOST="$(node -e "const c=require(process.argv[1]); process.stdout.write(String(c.bindHost || '127.0.0.1'))" "${REMOTE_CONFIG_PATH}")"
 curl --fail --silent --show-error "http://${BIND_HOST}:${PORT}/health"
 echo
 REMOTE_SCRIPT

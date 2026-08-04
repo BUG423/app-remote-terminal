@@ -46,6 +46,16 @@ test('部署脚本不上传密钥、不改防火墙和默认 Nginx 站点', () =
   assert(!/sites-enabled\/default/.test(source));
 });
 
+test('部署脚本保留外置配置并复用现有进程管理器', () => {
+  const source = fs.readFileSync(path.join(root, 'deploy.sh'), 'utf8');
+  assert(source.includes('REMOTE_CONFIG_PATH'));
+  assert(source.includes('systemctl cat "${SERVER_SERVICE}"'));
+  assert(source.includes('systemctl restart "${SERVER_SERVICE}"'));
+  assert(source.includes('pm2 describe remote-terminal-server'));
+  assert(source.indexOf('systemctl cat "${SERVER_SERVICE}"') < source.indexOf('pm2 describe remote-terminal-server'));
+  assert(!source.includes('CW_CONFIG_PATH="${REMOTE_DIR}/config.json"'));
+});
+
 test('浏览器入口只引用 Server 本地依赖', () => {
   const html = fs.readFileSync(path.join(root, 'server/public/index.html'), 'utf8');
   assert(html.includes('/vendor/xterm.js'));

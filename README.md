@@ -121,10 +121,11 @@ sudo systemctl reload nginx
 SERVER_HOST=服务器地址 \
 SERVER_SSH_PORT=822 \
 REMOTE_DIR=/opt/remote-terminal \
+REMOTE_CONFIG_PATH=/etc/remote-terminal/server.json \
 bash deploy.sh
 ```
 
-`deploy.sh` 只接受干净的现有 Git 工作区，只做 `origin/main` 快进更新、`npm ci`、PM2 重载和健康检查。它不会上传配置、安装系统包、修改防火墙或覆盖 Nginx。
+`deploy.sh` 只接受干净的现有 Git 工作区，只做 `origin/main` 快进更新、`npm ci`、现有 systemd 单元或 PM2 进程重启，以及健康检查。`REMOTE_CONFIG_PATH` 默认是仓库根目录下的 `config.json`；使用上述加固 systemd 单元时应指向 `/etc/remote-terminal/server.json`。脚本不会上传或覆盖配置、安装系统包、修改防火墙或覆盖 Nginx。
 
 涉及终端状态协议的版本升级应先更新 Server，再更新远程 Agent。新版 Server 兼容升级期间仍打开的旧页面和旧 Agent；Agent 更新后才会启用中继重启时的完整状态恢复。
 
