@@ -18,6 +18,7 @@ const WebSocket = require('ws');
 const sessionManager = require('./session-manager');
 const auditLog = require('./audit-log');
 const { OutputBacklog, splitUtf8 } = require('./output-backlog');
+const { TerminalState } = require('./terminal-state');
 const { buildServerUrl, createConnectionOptions, displayUrl } = require('./connection-options');
 
 // ─── 配置 ───────────────────────────────────────────────────────
@@ -117,6 +118,29 @@ const ENABLE_LEGACY_CHAT = config.enableLegacyChat === true;
 const LEGACY_CHAT_SKIP_PERMISSIONS = config.claudeDangerouslySkipPermissions === true;
 const MAX_CHAT_QUEUE = 20;
 const offlineOutput = new OutputBacklog(OFFLINE_OUTPUT_BYTES);
+const terminalStates = new Map();
+const closedTerminalIds = new Set();
+const TERMINAL_STATE_BYTES = Math.min(OFFLINE_OUTPUT_BYTES, 768 * 1024);
+let terminalStateBytes = TERMINAL_STATE_BYTES;
+
+function ensureTerminalState(sessionId) {
+  let state = terminalStates.get(sessionId);
+  if (!state) {
+    state = new TerminalState({
+      scrollbackRows: 5000,
+      maxSnapshotBytes: terminalStateBytes,
+    });
+    terminalStates.set(sessionId, state);
+  }
+  return state;
+}
+
+function dropTerminalState(sessionId) {
+  const state = terminalStates.get(sessionId);
+  if (!state) return;
+  terminalStates.delete(sessionId);
+  state.dispose();
+}
 
 function byteLength(value) {
   return Buffer.byteLength(String(value || ''), 'utf8');
@@ -139,6 +163,7 @@ let ws = null;
 let reconnectTimer = null;
 let reconnectAttempts = 0;
 let authenticated = false;
+let relaySynchronizing = false;
 let shuttingDown = false;
 let lastPongAt = 0;        // 最近一次收到服务器 pong 的时间戳
 const MAX_RECONNECT_DELAY = 30000;
@@ -181,6 +206,7 @@ function connect() {
   socket.on('pong', () => { lastPongAt = Date.now(); });
 
   socket.on('message', (raw) => {
+    if (ws !== socket) return;
     let data;
     try {
       data = JSON.parse(raw.toString());
@@ -188,20 +214,20 @@ function connect() {
       console.warn('⚠  收到无效 JSON');
       return;
     }
-    handleMessage(data);
+    handleMessage(data, socket);
   });
 
   socket.on('close', (code) => {
     console.log(`🔌 与服务器断开 (code: ${code})`);
+    if (ws !== socket) return;
     authenticated = false;
-    if (ws === socket) ws = null;
-    // code 4000 = 服务器端 "New agent connected"：已有另一个 Agent 接管。
-    // 若此时自动重连，会和对方互相踢下线形成每秒乒乓循环，导致会话错乱。
-    // 因此被踢的 Agent 停止重连、进入空闲，确保全局只有一个活跃 Agent。
+    ws = null;
+    relaySynchronizing = false;
+    // code 4000 = 已有健康 Agent 占用该设备。Server 会保留先到者，当前
+    // 进程低频重试；这样既不会互踢，也不会永远停在 systemd 看不出的空闲态。
     if (code === 4000) {
-      console.warn('⚠  另一个 Agent 已接管服务器连接（code 4000）。');
-      console.warn('⚠  本 Agent 停止自动重连并进入空闲，避免两个 Agent 互相抢占。');
-      console.warn('⚠  请确认只运行一个 Agent；如需本机接管，请先停止另一个 Agent 再重启本进程。');
+      console.warn('⚠  已有另一个健康 Agent 在线（code 4000），30s 后重新检查。');
+      if (!shuttingDown) scheduleReconnect(30000);
       return;
     }
     if (!shuttingDown) scheduleReconnect();
@@ -212,10 +238,10 @@ function connect() {
   });
 }
 
-function scheduleReconnect() {
+function scheduleReconnect(minDelay = 0) {
   if (reconnectTimer || shuttingDown) return;
   const baseDelay = Math.min(1000 * Math.pow(2, reconnectAttempts), MAX_RECONNECT_DELAY);
-  const delay = Math.round(baseDelay * (0.8 + Math.random() * 0.4));
+  const delay = Math.max(minDelay, Math.round(baseDelay * (0.8 + Math.random() * 0.4)));
   reconnectAttempts++;
   console.log(`🔄 ${delay / 1000}s 后重连 (第 ${reconnectAttempts} 次)...`);
   reconnectTimer = setTimeout(() => {
@@ -256,6 +282,15 @@ const OUT_FLUSH_MS = 12;
 const OUT_MAX_BYTES = 64 * 1024;
 
 function queueOutput(sessionId, chunk) {
+  if (closedTerminalIds.has(sessionId)) return;
+  try {
+    const appended = ensureTerminalState(sessionId).append(chunk);
+    appended.completion.catch((err) => {
+      console.error(`⚠  本地终端状态解析失败 (${sessionId}):`, err.message);
+    });
+  } catch (err) {
+    console.error(`⚠  本地终端状态记录失败 (${sessionId}):`, err.message);
+  }
   let b = outBuffers.get(sessionId);
   if (!b) { b = { data: '', timer: null }; outBuffers.set(sessionId, b); }
   b.data += chunk;
@@ -275,6 +310,10 @@ function flushOutput(sessionId) {
 }
 
 function sendOutputData(sessionId, data, recovered) {
+  if (relaySynchronizing) {
+    offlineOutput.append(sessionId, data);
+    return true;
+  }
   const chunks = splitUtf8(data, OUT_MAX_BYTES);
   for (let i = 0; i < chunks.length; i++) {
     if (!send({ type: 'terminal_output', sessionId, data: chunks[i], ...(recovered ? { recovered: true } : {}) })) {
@@ -290,9 +329,11 @@ function dropOutputBuffer(sessionId) {
   if (b && b.timer) clearTimeout(b.timer);
   outBuffers.delete(sessionId);
   offlineOutput.drop(sessionId);
+  dropTerminalState(sessionId);
 }
 
 function flushOfflineOutput() {
+  if (relaySynchronizing) return;
   const entries = offlineOutput.drain();
   for (let i = 0; i < entries.length; i++) {
     const [sessionId, data] = entries[i];
@@ -303,16 +344,73 @@ function flushOfflineOutput() {
   }
 }
 
+/**
+ * Rebuild a freshly restarted relay from Agent-side emulator snapshots.
+ * Snapshot boundaries are captured synchronously for every session; output
+ * produced afterwards is held in offlineOutput and flushed only after all
+ * snapshots have been accepted by the relay.
+ */
+async function synchronizeRelayState(socket) {
+  const pending = [...terminalStates].map(([sessionId, state]) => ({
+    sessionId,
+    snapshot: state.snapshot(),
+  }));
+  // All output buffered before these boundaries is already represented by the
+  // snapshots. Output arriving after this point is buffered by relaySynchronizing.
+  offlineOutput.clear();
+
+  try {
+    const snapshots = await Promise.all(pending.map(async (item) => ({
+      sessionId: item.sessionId,
+      snapshot: await item.snapshot,
+    })));
+    if (ws !== socket || !authenticated || socket.readyState !== WebSocket.OPEN) return;
+
+    for (const item of snapshots) {
+      const ok = send({
+        type: 'terminal_state',
+        sessionId: item.sessionId,
+        data: item.snapshot.data,
+        cols: item.snapshot.cols,
+        rows: item.snapshot.rows,
+        historyTruncated: item.snapshot.historyTruncated,
+      });
+      if (!ok) return;
+    }
+    if (offlineOutput.hasTruncatedOutput()) {
+      // 同步窗口内仍在高速刷屏且增量缓冲已裁剪：再取一个更靠后的完整
+      // 状态，绝不把从 ANSI 中间截断的尾部数据发给中继。
+      return synchronizeRelayState(socket);
+    }
+    relaySynchronizing = false;
+    flushOfflineOutput();
+  } catch (err) {
+    console.error('⚠  向中继同步终端状态失败:', err.message);
+    try { socket.terminate(); } catch { /* ignore */ }
+  }
+}
+
 // ─── 消息处理 ───────────────────────────────────────────────────
-function handleMessage(data) {
+function handleMessage(data, socket) {
   switch (data.type) {
     case 'auth_ok':
       console.log('🤖 Agent 认证成功');
       authenticated = true;
+      relaySynchronizing = true;
+      {
+        const relayStateLimit = positiveInt(
+          data.maxTerminalStateBytes,
+          TERMINAL_STATE_BYTES,
+          16 * 1024,
+          768 * 1024
+        );
+        terminalStateBytes = relayStateLimit;
+        for (const [, state] of terminalStates) state.maxSnapshotBytes = relayStateLimit;
+      }
       // 清理可能残留的异常状态会话，然后上报
       sessionManager.cleanStaleSessions();
       reportSessions();
-      flushOfflineOutput();
+      void synchronizeRelayState(socket);
       break;
 
     // ── 终端：创建 ────────────────────────────────────────────
@@ -343,13 +441,23 @@ function handleMessage(data) {
       const session = sessionManager.getSession(data.sessionId);
       const cols = Math.max(2, Math.min(MAX_COLS, Number.parseInt(data.cols, 10) || 120));
       const rows = Math.max(2, Math.min(MAX_ROWS, Number.parseInt(data.rows, 10) || 30));
-      if (session) session.terminal.resize(cols, rows);
+      if (session) {
+        session.terminal.resize(cols, rows);
+        const state = terminalStates.get(data.sessionId);
+        if (state) state.resize(cols, rows).catch((err) => {
+          console.warn(`⚠  本地终端状态 resize 失败 (${data.sessionId}):`, err.message);
+        });
+      }
       break;
     }
 
     // ── 终端：删除 ────────────────────────────────────────────
     case 'terminal_delete': {
       if (!validSessionId(data.sessionId)) break;
+      closedTerminalIds.add(data.sessionId);
+      const closedSessionId = data.sessionId;
+      const forgetClosedTimer = setTimeout(() => closedTerminalIds.delete(closedSessionId), 10000);
+      forgetClosedTimer.unref();
       dropOutputBuffer(data.sessionId);
       auditLog.clearSession(data.sessionId);
       sessionManager.deleteSession(data.sessionId, !!data.deleteFiles);
@@ -385,10 +493,12 @@ function onTerminalCreate(data) {
     send({ type: 'terminal_error', sessionId, message: '无效的 sessionId' });
     return;
   }
+  closedTerminalIds.delete(sessionId);
 
   // 已存在则直接回报，不重复创建
   if (sessionManager.getSession(sessionId)) {
     const s = sessionManager.getSession(sessionId);
+    ensureTerminalState(sessionId);
     send({ type: 'terminal_created', sessionId, title: s.title, cwd: s.cwd, pid: s.pid, status: s.status });
     reportSessions();
     return;
@@ -592,6 +702,8 @@ function shutdown() {
   console.log('\n🛑 正在关闭 Agent...');
   if (reconnectTimer) clearTimeout(reconnectTimer);
   sessionManager.destroyAllSessions();
+  for (const [, state] of terminalStates) state.dispose();
+  terminalStates.clear();
   for (const [, s] of chatProcesses) if (s.proc) s.proc.kill('SIGTERM');
   if (ws) ws.close(1000, 'Agent shutting down');
   process.exit(0);

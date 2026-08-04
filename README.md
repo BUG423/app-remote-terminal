@@ -10,7 +10,8 @@
 
 - 基于 `xterm.js` 和 `node-pty` 的交互式 Shell
 - 多会话、切换、分屏、历史回放和刷新恢复
-- Agent 断线重连；中继重启期间 PTY 保持运行，受限大小内的离线输出会在重连后补回
+- Agent 断线重连；中继重启后由 Agent 的完整终端状态恢复 PTY 画面与离线输出
+- 可见会话按需订阅、输出序号校验和浏览器渲染背压，持续刷屏时自动安全重同步
 - 浏览器与 Agent 角色凭据分离，多设备独立路由
 - WSS、HTTP/HTTPS 出口代理和 `NO_PROXY`
 - 会话数、浏览器连接数、消息大小和回放缓存上限
@@ -28,7 +29,7 @@ Agent ─── WSS 443 ────────┘                         │
 Agent 上的 node-pty / bash / zsh  <────────────────┘
 ```
 
-Server 只负责页面、鉴权、路由和有限回放缓存。所有命令都在 Agent 所在机器执行，Agent 不监听公网端口。
+Server 负责页面、鉴权、路由和受限大小的内存终端状态；Agent 同时保留权威终端状态用于中继重启恢复。所有命令都在 Agent 所在机器执行，Agent 不监听公网端口，终端状态不会写入磁盘。
 
 对于禁止 SSH 22、向日葵或 ToDesk 的受限服务器，只要它仍被授权主动访问中继 Server 的 WSS 地址（通常是 TCP 443），就可以运行 Agent。若出口必须经过企业代理，可设置 `proxyUrl`、`HTTPS_PROXY` 或 `HTTP_PROXY`。
 
@@ -65,7 +66,9 @@ Server 配置：
   },
   "maxSessions": 12,
   "maxBrowsersPerToken": 8,
-  "scrollbackBytes": 262144
+  "scrollbackBytes": 262144,
+  "scrollbackRows": 5000,
+  "maxSyncPendingBytes": 524288
 }
 ```
 
@@ -122,6 +125,8 @@ bash deploy.sh
 ```
 
 `deploy.sh` 只接受干净的现有 Git 工作区，只做 `origin/main` 快进更新、`npm ci`、PM2 重载和健康检查。它不会上传配置、安装系统包、修改防火墙或覆盖 Nginx。
+
+涉及终端状态协议的版本升级应先更新 Server，再更新远程 Agent。新版 Server 兼容升级期间仍打开的旧页面和旧 Agent；Agent 更新后才会启用中继重启时的完整状态恢复。
 
 ## 定期监控中继
 
@@ -210,7 +215,9 @@ TLS 证书默认严格校验。私有 CA 可通过 Agent 配置中的 `tlsCaPath
 | `CW_MAX_SESSIONS` | 每个 Agent 的最大会话数 |
 | `CW_MAX_BROWSERS_PER_TOKEN` | 每 Token 最大浏览器连接数 |
 | `CW_OFFLINE_OUTPUT_BYTES` | Agent 每会话离线输出缓冲上限 |
-| `CW_SCROLLBACK_BYTES` | Server 每会话历史回放上限 |
+| `CW_SCROLLBACK_BYTES` | Server 每会话完整终端快照字节上限 |
+| `CW_SCROLLBACK_ROWS` | Server 每会话终端历史行数上限 |
+| `CW_MAX_SYNC_PENDING_BYTES` | 生成快照期间每个浏览器订阅的增量输出上限 |
 | `CW_AUDIT_LOG` | 审计日志路径 |
 | `CW_AUDIT_ENABLED=false` | 关闭命令输入审计 |
 
@@ -232,7 +239,8 @@ bash scripts/run-server-tests.sh
 - Token 鉴权、隔离、重复鉴权、暴力尝试和认证超时
 - 消息大小、会话上限、浏览器连接上限和恶意 Agent 数据
 - 真实终端创建、输入、回放、删除和长任务
-- Server 实际停止并重启后的 Agent 重连、PTY 存活和离线输出补回
+- Server 实际停止并重启后的 Agent 重连、PTY 存活和完整终端状态恢复
+- ANSI/中文快照、连续输出序号、浏览器单连接状态机和 xterm 渲染背压
 - 审计日志权限与轮转、测试进程和监听端口清理
 
 ## 安全要求

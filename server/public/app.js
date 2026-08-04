@@ -13,11 +13,9 @@ const STATE = {
   sessions: [],           // [{ id, title, cwd, pid, status, createdAt }]
   activeId: null,
   splitMode: false,       // 分屏模式：同时显示多个终端
-  reconnectAttempts: 0,
-  reconnectEnabled: true,
 };
 
-// sessionId -> { term, fit, container, attached, observer, lastActivity }
+// sessionId -> { term, fit, stream, container, subscribed, observer, lastActivity }
 const terminals = new Map();
 
 // 会话活动计时器：用于定期刷新侧栏活动指示器
@@ -31,6 +29,17 @@ const AGENT_OFFLINE_CLEANUP_MS = 30000;
 // Agent 离线防抖：短暂断连不更新 UI，避免闪烁
 let agentOfflineDebounce = null;
 const AGENT_OFFLINE_DEBOUNCE_MS = 3000;
+
+function cancelAgentOfflineTimers() {
+  if (agentOfflineDebounce) {
+    clearTimeout(agentOfflineDebounce);
+    agentOfflineDebounce = null;
+  }
+  if (agentOfflineTimer) {
+    clearTimeout(agentOfflineTimer);
+    agentOfflineTimer = null;
+  }
+}
 
 // ── DOM ────────────────────────────────────────────────────────
 const $ = (id) => document.getElementById(id);
@@ -65,83 +74,56 @@ function uuid() {
 const getToken = () => sessionStorage.getItem('claude-web-token') || '';
 const saveToken = (t) => sessionStorage.setItem('claude-web-token', t);
 
+const wsClient = new StrictWebSocket.StrictWebSocketClient({
+  createSocket: (url) => new WebSocket(url),
+  getUrl: () => {
+    const protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
+    return `${protocol}//${location.host}`;
+  },
+  getToken,
+  onMessage: handleMessage,
+  onSocket: (socket) => { STATE.ws = socket; },
+  onDisconnect: () => {
+    STATE.authenticated = false;
+    STATE.agentOnline = false;
+    markAllTerminalsUnsubscribed();
+    updateAgentStatus();
+  },
+  onNoToken: showLogin,
+  onError: () => {},
+});
+
 function sendWS(obj) {
-  if (STATE.ws && STATE.ws.readyState === 1) {
-    STATE.ws.send(JSON.stringify(obj));
-    return true;
-  }
-  return false;
+  return wsClient.send(obj);
 }
 
 // ── WebSocket ──────────────────────────────────────────────────
-let connecting = false;
-
 function connect() {
-  if (connecting) return; // 防止重连风暴
-  const token = getToken();
-  if (!token) return showLogin();
-
-  connecting = true;
-  const protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
-  const ws = new WebSocket(`${protocol}//${location.host}`);
-  STATE.ws = ws;
-
-  ws.onopen = () => {
-    connecting = false;
-    ws.send(JSON.stringify({ type: 'auth', token: getToken(), role: 'browser' }));
-  };
-  ws.onmessage = (e) => {
-    let data;
-    try { data = JSON.parse(e.data); } catch { return; }
-    handleMessage(data);
-  };
-  ws.onclose = () => {
-    connecting = false;
-    if (STATE.ws === ws) STATE.ws = null;
-    STATE.authenticated = false;
-    updateAgentStatus();
-    scheduleReconnect();
-  };
-  ws.onerror = () => { connecting = false; };
-}
-
-let reconnectScheduled = false;
-
-function scheduleReconnect() {
-  if (reconnectScheduled) return;
-  if (!STATE.reconnectEnabled || !getToken()) return;
-  reconnectScheduled = true;
-  const baseDelay = Math.min(1000 * Math.pow(2, Math.min(STATE.reconnectAttempts, 5)), 30000);
-  const delay = Math.round(baseDelay * (0.8 + Math.random() * 0.4));
-  STATE.reconnectAttempts++;
-  setTimeout(() => {
-    reconnectScheduled = false;
-    connect();
-  }, delay);
+  wsClient.connect();
 }
 
 // ── 消息分发 ───────────────────────────────────────────────────
 function handleMessage(data) {
   switch (data.type) {
     case 'auth_ok':
+      wsClient.markAuthenticated();
       STATE.authenticated = true;
-      STATE.reconnectEnabled = true;
-      STATE.reconnectAttempts = 0;
       STATE.clientId = data.clientId;
       STATE.agentOnline = data.agentOnline;
       STATE.agentName = data.agentName || '';
       STATE.sessions = data.sessions || [];
+      if (STATE.agentOnline) cancelAgentOfflineTimers();
       showMain();
+      reconcileTerminals();
       renderSessionList();
       updateAgentStatus();
-      // 重连：对所有已存在的终端重新 attach
-      resyncTerminals();
       restoreActive();
+      syncVisibleSubscriptions();
       break;
 
     case 'error':
       if (!STATE.authenticated) {
-        STATE.reconnectEnabled = false;
+        wsClient.disableReconnect();
         sessionStorage.removeItem('claude-web-token');
         showLoginError(data.message || '认证失败');
       }
@@ -168,14 +150,7 @@ function handleMessage(data) {
         }
       } else {
         // Agent 上线：取消离线防抖和清理定时器
-        if (agentOfflineDebounce) {
-          clearTimeout(agentOfflineDebounce);
-          agentOfflineDebounce = null;
-        }
-        if (agentOfflineTimer) {
-          clearTimeout(agentOfflineTimer);
-          agentOfflineTimer = null;
-        }
+        cancelAgentOfflineTimers();
         STATE.agentOnline = true;
         if (data.agentName) STATE.agentName = data.agentName;
         updateAgentStatus();
@@ -184,10 +159,12 @@ function handleMessage(data) {
 
     case 'sessions':
       STATE.sessions = data.sessions || [];
-      renderSessionList();
       reconcileTerminals();
+      if (!STATE.activeId && STATE.sessions.length > 0) restoreActive();
+      renderSessionList();
       updateActiveHeader();
       if (STATE.splitMode) refreshTileView();
+      syncVisibleSubscriptions();
       break;
 
     case 'terminal_created':
@@ -198,18 +175,25 @@ function handleMessage(data) {
       break;
 
     case 'terminal_output':
-      writeOutput(data.sessionId, data.data, data.replay);
+      writeOutput(data.sessionId, data.data, data.seq);
+      break;
+
+    case 'terminal_snapshot':
+      applyTerminalSnapshot(data);
       break;
 
     case 'terminal_attached': {
       const t = terminals.get(data.sessionId);
-      if (t) t.attached = true;
+      if (t && Number.isSafeInteger(data.seq) && t.stream.lastSequence !== null &&
+          data.seq > t.stream.lastSequence) {
+        requestTerminalResync(data.sessionId);
+      }
       break;
     }
 
     case 'terminal_exit':
       markStatus(data.sessionId, 'exited');
-      writeOutput(data.sessionId, `\r\n\x1b[33m[进程退出 code=${data.exitCode}]\x1b[0m\r\n`);
+      writeLocalOutput(data.sessionId, `\r\n\x1b[33m[进程退出 code=${data.exitCode}]\x1b[0m\r\n`);
       break;
 
     case 'terminal_closed':
@@ -219,7 +203,7 @@ function handleMessage(data) {
 
     case 'terminal_error':
       if (data.sessionId && terminals.has(data.sessionId)) {
-        writeOutput(data.sessionId, `\r\n\x1b[31m[错误] ${data.message}\x1b[0m\r\n`);
+        writeLocalOutput(data.sessionId, `\r\n\x1b[31m[错误] ${data.message}\x1b[0m\r\n`);
       } else {
         alert('❌ ' + (data.message || '操作失败'));
       }
@@ -256,7 +240,10 @@ function removeSession(id) {
 function disposeTerminal(sessionId) {
   const t = terminals.get(sessionId);
   if (!t) return;
+  if (t.subscribed) sendWS({ type: 'terminal_detach', sessionId });
+  t.subscribed = false;
   if (t.observer) { t.observer.disconnect(); t.observer = null; }
+  t.stream.dispose();
   try { t.term.dispose(); } catch {}
   try { t.container.remove(); } catch {}
   terminals.delete(sessionId);
@@ -290,6 +277,10 @@ function reconcileTerminals() {
   for (const [id] of terminals) {
     if (!ids.has(id)) disposeTerminal(id);
   }
+  if (STATE.activeId && !ids.has(STATE.activeId)) {
+    STATE.activeId = null;
+    localStorage.removeItem('claude-web-active');
+  }
 }
 
 // ── 终端实例 ───────────────────────────────────────────────────
@@ -305,12 +296,16 @@ function ensureTerminal(sessionId) {
   const term = new Terminal({
     cursorBlink: true,
     fontSize: 14,
-    fontFamily: 'Menlo, Monaco, "Courier New", monospace',
+    fontFamily: '"SFMono-Regular", Menlo, Monaco, Consolas, "Liberation Mono", "Noto Sans Mono CJK SC", "Noto Sans CJK SC", "PingFang SC", "Microsoft YaHei", monospace',
     theme: { background: '#0d1117', foreground: '#e6edf3' },
     scrollback: 5000,
+    allowProposedApi: true,
   });
   const fit = new FitAddon.FitAddon();
   term.loadAddon(fit);
+  const unicode11 = new Unicode11Addon.Unicode11Addon();
+  term.loadAddon(unicode11);
+  term.unicode.activeVersion = '11';
   term.open(container);
 
   // 键入 → 发送到 Agent
@@ -344,34 +339,86 @@ function ensureTerminal(sessionId) {
   });
   observer.observe(container);
 
-  const entry = { term, fit, container, attached: false, observer, lastActivity: 0 };
+  const stream = new TerminalStream.TerminalStreamController(term, {
+    maxPendingBytes: 512 * 1024,
+    onResync: () => requestTerminalResync(sessionId),
+    onSnapshotApplied: () => {
+      const current = terminals.get(sessionId);
+      if (!current || current.container.style.display === 'none') return;
+      requestAnimationFrame(() => fitTerminal(sessionId));
+    },
+  });
+  const entry = {
+    term,
+    fit,
+    stream,
+    unicode11,
+    container,
+    subscribed: false,
+    observer,
+    lastActivity: 0,
+  };
   terminals.set(sessionId, entry);
-
-  // 请求历史回放
-  sendWS({ type: 'terminal_attach', sessionId });
   return entry;
 }
 
-function writeOutput(sessionId, data, replay) {
-  const t = ensureTerminal(sessionId);
-  // 记录活动时间戳
+function writeOutput(sessionId, data, sequence) {
+  const t = terminals.get(sessionId);
+  if (!t || !t.subscribed) return;
   t.lastActivity = Date.now();
-
-  if (replay) {
-    t.term.reset();
-    t.term.write(data);
-    t.attached = true;
-  } else if (t.attached) {
-    t.term.write(data);
-  }
-  // 未 attached 的实时输出忽略——它会包含在 replay 快照中，避免重复
+  t.stream.acceptOutput(data, sequence);
 }
 
-// 重连后：对所有已存在的终端重新请求历史回放
-function resyncTerminals() {
+function writeLocalOutput(sessionId, data) {
+  const t = terminals.get(sessionId);
+  if (t) t.stream.writeLocal(data);
+}
+
+function applyTerminalSnapshot(data) {
+  const t = terminals.get(data.sessionId);
+  if (!t || !t.subscribed) {
+    sendWS({ type: 'terminal_detach', sessionId: data.sessionId });
+    return;
+  }
+  t.stream.applySnapshot(data);
+}
+
+function requestTerminalResync(sessionId) {
+  const t = terminals.get(sessionId);
+  if (!t || !t.subscribed || !STATE.authenticated) return;
+  sendWS({ type: 'terminal_resync', sessionId });
+}
+
+function markAllTerminalsUnsubscribed() {
   for (const [id, t] of terminals) {
-    t.attached = false;
-    sendWS({ type: 'terminal_attach', sessionId: id });
+    t.subscribed = false;
+    t.stream.beginSync();
+  }
+}
+
+function visibleSessionIds() {
+  if (STATE.splitMode) {
+    return new Set(STATE.sessions.filter((s) => s.status !== 'exited').map((s) => s.id));
+  }
+  return new Set(STATE.activeId ? [STATE.activeId] : []);
+}
+
+/** 保证服务器只推送当前可见终端，隐藏会话不再消耗浏览器渲染队列。 */
+function syncVisibleSubscriptions() {
+  if (!STATE.authenticated) return;
+  const desired = visibleSessionIds();
+  for (const sessionId of desired) ensureTerminal(sessionId);
+
+  for (const [sessionId, t] of terminals) {
+    const shouldSubscribe = desired.has(sessionId);
+    if (!shouldSubscribe && t.subscribed) {
+      sendWS({ type: 'terminal_detach', sessionId });
+      t.subscribed = false;
+      t.stream.pause();
+    } else if (shouldSubscribe && !t.subscribed) {
+      t.stream.beginSync();
+      t.subscribed = sendWS({ type: 'terminal_attach', sessionId });
+    }
   }
 }
 
@@ -403,6 +450,7 @@ function selectSession(sessionId) {
     }
     const entry = ensureTerminal(sessionId);
     entry.container.style.display = 'block';
+    syncVisibleSubscriptions();
     // 双重 rAF 确保 DOM 布局完成后再 fit
     requestAnimationFrame(() => {
       requestAnimationFrame(() => {
@@ -454,6 +502,7 @@ function refreshTileView() {
   if (visibleSessions.length === 0) {
     terminalsEl.classList.remove('tiled');
     emptyHint.style.display = '';
+    syncVisibleSubscriptions();
     return;
   }
 
@@ -481,6 +530,8 @@ function refreshTileView() {
     }
   }
 
+  syncVisibleSubscriptions();
+
   // 延迟 fit 确保 grid 布局完成
   requestAnimationFrame(() => {
     requestAnimationFrame(() => {
@@ -495,7 +546,11 @@ function restoreActive() {
   const saved = localStorage.getItem('claude-web-active');
   const target = STATE.sessions.find((s) => s.id === saved) || STATE.sessions[0];
   if (target) selectSession(target.id);
-  else updateActiveHeader();
+  else {
+    STATE.activeId = null;
+    localStorage.removeItem('claude-web-active');
+    updateActiveHeader();
+  }
 }
 
 // ── 新建 / 删除 ────────────────────────────────────────────────
@@ -686,8 +741,8 @@ loginForm.addEventListener('submit', (e) => {
   if (!t) return;
   loginBtn.disabled = true;
   loginError.classList.add('hidden');
-  STATE.reconnectEnabled = true;
-  STATE.reconnectAttempts = 0;
+  wsClient.enableReconnect();
+  wsClient.resetBackoff();
   saveToken(t);
   connect();
 });
@@ -709,22 +764,17 @@ window.addEventListener('resize', () => {
 });
 
 window.addEventListener('online', () => {
-  STATE.reconnectAttempts = 0;
-  if (!STATE.ws || STATE.ws.readyState > 1) connect();
+  wsClient.resetBackoff();
+  connect();
 });
 
 document.addEventListener('visibilitychange', () => {
-  if (document.visibilityState === 'visible' && getToken() &&
-      (!STATE.ws || STATE.ws.readyState > 1)) {
-    connect();
-  }
+  if (document.visibilityState === 'visible' && getToken()) connect();
 });
 
 // 心跳
 setInterval(() => {
-  if (STATE.ws && STATE.ws.readyState === 1 && STATE.authenticated) {
-    STATE.ws.send(JSON.stringify({ type: 'ping' }));
-  }
+  if (STATE.authenticated) sendWS({ type: 'ping' });
 }, 30000);
 
 // ── 启动 ───────────────────────────────────────────────────────

@@ -33,8 +33,10 @@
   "maxTotalConnections": 200,
   "maxWsBufferedBytes": 2097152,
   "scrollbackBytes": 262144,
+  "scrollbackRows": 5000,
+  "maxSyncPendingBytes": 524288,
   "offlineOutputBytes": 262144,
-  "_limits_comment": "限制每个 Agent 的 PTY 数、浏览器连接数，以及 Server/Agent 每会话输出缓存",
+  "_limits_comment": "限制 PTY/浏览器数量、完整终端状态历史，以及同步期间的增量输出缓存",
 
   "auditEnabled": true,
   "auditLogPath": "~/WebClaudeWorkspaces/.audit.log",

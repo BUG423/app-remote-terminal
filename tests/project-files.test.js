@@ -49,6 +49,9 @@ test('部署脚本不上传密钥、不改防火墙和默认 Nginx 站点', () =
 test('浏览器入口只引用 Server 本地依赖', () => {
   const html = fs.readFileSync(path.join(root, 'server/public/index.html'), 'utf8');
   assert(html.includes('/vendor/xterm.js'));
+  assert(html.includes('/vendor/addon-unicode11.js'));
+  assert(html.includes('/strict-websocket.js'));
+  assert(html.includes('/terminal-stream.js'));
   assert(!/https?:\/\//.test(html));
 });
 

@@ -152,7 +152,7 @@ async function connectBrowser() {
     });
     ws.once('error', reject);
   });
-  client.send({ type: 'auth', token: browserToken, role: 'browser' });
+  client.send({ type: 'auth', token: browserToken, role: 'browser', protocolVersion: 2 });
   const auth = await client.waitFor((message) => message.type === 'auth_ok');
   return { client, auth };
 }
@@ -219,13 +219,10 @@ async function cleanup() {
 
   second.client.send({ type: 'terminal_attach', sessionId });
   await second.client.waitFor((message) => message.type === 'terminal_attached' && message.sessionId === sessionId);
-  await wait(1000);
-  const recoveredOutput = second.client.messages
-    .filter((message) => message.type === 'terminal_output' && message.sessionId === sessionId)
-    .map((message) => message.data)
-    .join('');
-  check('断线期间输出在重连后补回',
-    recoveredOutput.includes('OFFLINE_ONE') && recoveredOutput.includes('OFFLINE_TWO'));
+  const recoveredState = await second.client.waitFor((message) =>
+    message.type === 'terminal_snapshot' && message.sessionId === sessionId &&
+    message.data.includes('OFFLINE_ONE') && message.data.includes('OFFLINE_TWO'), 10000);
+  check('断线期间输出通过完整终端状态在重连后补回', !!recoveredState);
 
   second.client.send({ type: 'terminal_input', sessionId, data: 'echo RECONNECTED_OK\r' });
   const liveOutput = await second.client.waitFor((message) => message.type === 'terminal_output' &&

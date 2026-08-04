@@ -64,8 +64,10 @@ test('断线输出按会话保留并限制 UTF-8 字节数', () => {
   backlog.append('b', 'other');
   assert(Buffer.byteLength(backlog.get('a'), 'utf8') <= 12);
   assert(backlog.get('a').endsWith('TAIL'));
+  assert(backlog.hasTruncatedOutput());
   assert.deepEqual(backlog.drain().map(([id]) => id), ['a', 'b']);
   assert.equal(backlog.get('a'), '');
+  assert(!backlog.hasTruncatedOutput());
 });
 
 test('恢复输出按 UTF-8 边界拆成受控消息', () => {
@@ -73,6 +75,20 @@ test('恢复输出按 UTF-8 边界拆成受控消息', () => {
   assert(chunks.length > 1);
   assert(chunks.every((chunk) => Buffer.byteLength(chunk, 'utf8') <= 64));
   assert.equal(chunks.join(''), '中'.repeat(100) + 'TAIL');
+});
+
+test('离线缓冲可在完整状态快照接管后原子清空', () => {
+  const backlog = new OutputBacklog(1024);
+  backlog.append('a', 'old-output');
+  backlog.append('b', 'other-output');
+  backlog.clear();
+  assert.equal(backlog.get('a'), '');
+  assert.deepEqual(backlog.drain(), []);
+});
+
+test('重复 Agent 被拒后会低频重试而不是永久空闲', () => {
+  const source = fs.readFileSync(path.join(__dirname, '..', 'agent', 'index.js'), 'utf8');
+  assert(/code === 4000[\s\S]{0,300}scheduleReconnect\(30000\)/.test(source));
 });
 
 test('审计日志权限为 0600 且达到上限后轮转', () => {

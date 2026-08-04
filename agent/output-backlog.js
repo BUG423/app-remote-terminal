@@ -30,22 +30,37 @@ class OutputBacklog {
     }
     this.maxBytesPerSession = maxBytesPerSession;
     this.buffers = new Map();
+    this.truncated = new Set();
   }
 
   append(sessionId, chunk) {
     if (typeof sessionId !== 'string' || typeof chunk !== 'string' || !chunk) return;
     const current = this.buffers.get(sessionId) || '';
+    if (Buffer.byteLength(current + chunk, 'utf8') > this.maxBytesPerSession) {
+      this.truncated.add(sessionId);
+    }
     this.buffers.set(sessionId, trimUtf8Tail(current + chunk, this.maxBytesPerSession));
   }
 
   drain() {
     const entries = [...this.buffers.entries()];
     this.buffers.clear();
+    this.truncated.clear();
     return entries;
+  }
+
+  clear() {
+    this.buffers.clear();
+    this.truncated.clear();
+  }
+
+  hasTruncatedOutput() {
+    return this.truncated.size > 0;
   }
 
   drop(sessionId) {
     this.buffers.delete(sessionId);
+    this.truncated.delete(sessionId);
   }
 
   get(sessionId) {

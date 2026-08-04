@@ -20,6 +20,7 @@ const express = require('express');
 const { WebSocketServer } = require('ws');
 const { createAuthMiddleware } = require('./auth');
 const rateLimiter = require('./rate-limiter');
+const { TerminalState } = require('./terminal-state');
 
 // 为所有 console 输出添加时间戳，方便排查时序问题
 const origLog = console.log;
@@ -82,7 +83,13 @@ const SCROLLBACK_LIMIT_BYTES = positiveInt(
   process.env.CW_SCROLLBACK_BYTES || config.scrollbackBytes,
   256 * 1024,
   16 * 1024,
-  4 * 1024 * 1024
+  512 * 1024
+);
+const SCROLLBACK_LIMIT_ROWS = positiveInt(
+  process.env.CW_SCROLLBACK_ROWS || config.scrollbackRows,
+  5000,
+  0,
+  10000
 );
 const MAX_SESSIONS_PER_AGENT = positiveInt(
   process.env.CW_MAX_SESSIONS || config.maxSessions,
@@ -107,6 +114,12 @@ const MAX_WS_BUFFERED_BYTES = positiveInt(
   2 * 1024 * 1024,
   64 * 1024,
   32 * 1024 * 1024
+);
+const MAX_SYNC_PENDING_BYTES = positiveInt(
+  process.env.CW_MAX_SYNC_PENDING_BYTES || config.maxSyncPendingBytes,
+  512 * 1024,
+  64 * 1024,
+  4 * 1024 * 1024
 );
 const ENABLE_LEGACY_CHAT = config.enableLegacyChat === true;
 
@@ -141,6 +154,9 @@ app.get('/vendor/xterm.css', (_req, res) => {
 app.get('/vendor/addon-fit.js', (_req, res) => {
   res.sendFile(path.join(__dirname, 'node_modules', '@xterm', 'addon-fit', 'lib', 'addon-fit.js'));
 });
+app.get('/vendor/addon-unicode11.js', (_req, res) => {
+  res.sendFile(path.join(__dirname, 'node_modules', '@xterm', 'addon-unicode11', 'lib', 'addon-unicode11.js'));
+});
 app.use(express.static(path.join(__dirname, 'public')));
 app.get('/health', (_req, res) => {
   if (config.healthDetails !== true) return res.json({ status: 'ok' });
@@ -170,6 +186,10 @@ const MAX_SESSION_ID_LENGTH = 128;
 const MAX_TITLE_LENGTH = 120;
 const MAX_INPUT_BYTES = 64 * 1024;
 const MAX_AGENT_OUTPUT_BYTES = 128 * 1024;
+const MAX_AGENT_STATE_BYTES = Math.max(
+  16 * 1024,
+  Math.min(768 * 1024, MAX_WS_PAYLOAD_BYTES - 64 * 1024)
+);
 const MAX_CWD_LENGTH = 4096;
 const MAX_COLS = 300;
 const MAX_ROWS = 100;
@@ -177,12 +197,12 @@ const MAX_ROWS = 100;
 const wss = new WebSocketServer({ server, maxPayload: MAX_WS_PAYLOAD_BYTES });
 
 // ─── 连接状态（多 Agent 架构）──────────────────────────────────────
-// token → { ws, name, sessions: [], scrollback: Map<sessionId, string>, cleanupTimer }
-/** @type {Map<string, {ws: WebSocket|null, name: string, sessions: any[], scrollback: Map<string,string>, cleanupTimer: any}>} */
+// token → { ws, name, sessions, terminalStates: Map<sessionId, TerminalState>, cleanupTimer }
+/** @type {Map<string, {ws: WebSocket|null, name: string, sessions: any[], terminalStates: Map<string,TerminalState>, cleanupTimer: any}>} */
 const agents = new Map();
 
-// 浏览器客户端：clientId → { ws, token }
-/** @type {Map<string, {ws: WebSocket, token: string}>} */
+// 浏览器客户端：clientId → { ws, token, subscriptions }
+/** @type {Map<string, {ws: WebSocket, token: string, protocolVersion: number, subscriptions: Map<string,any>}>} */
 const browserClients = new Map();
 
 /** Agent 离线后残留 disconnected 会话的自动清理延迟 */
@@ -194,7 +214,7 @@ const DISCONNECTED_CLEANUP_MS = 30000;
 function ensureAgentSlot(token, name) {
   let slot = agents.get(token);
   if (!slot) {
-    slot = { ws: null, name: name || 'unknown', sessions: [], scrollback: new Map(), cleanupTimer: null };
+    slot = { ws: null, name: name || 'unknown', sessions: [], terminalStates: new Map(), cleanupTimer: null };
     agents.set(token, slot);
   } else if (name && name !== 'unknown') {
     slot.name = name;
@@ -213,7 +233,10 @@ function scheduleDisconnectedCleanup(token) {
       const removed = s.sessions.filter(x => x.status === 'disconnected').length;
       if (removed > 0) {
         s.sessions = [];
-        s.scrollback.clear();
+        disposeAllTerminalStates(s);
+        for (const [, browser] of browserClients) {
+          if (browser.token === token) browser.subscriptions.clear();
+        }
         broadcastToBrowsers(token, { type: 'sessions', sessions: [] });
         console.log(`🧹 已清理 Agent「${s.name}」的 ${removed} 个残留会话（离线超时）`);
       }
@@ -265,18 +288,135 @@ function sendToAgent(token, data) {
   return false;
 }
 
-/** 追加滚动缓冲（按 Agent 隔离） */
-function appendScrollback(token, sessionId, chunk) {
-  const slot = agents.get(token);
-  if (!slot || !validSessionId(sessionId) || typeof chunk !== 'string') return;
-  let buf = (slot.scrollback.get(sessionId) || '') + chunk;
-  const bytes = Buffer.from(buf, 'utf8');
-  if (bytes.length > SCROLLBACK_LIMIT_BYTES) {
-    let start = bytes.length - SCROLLBACK_LIMIT_BYTES;
-    while (start < bytes.length && (bytes[start] & 0xc0) === 0x80) start++;
-    buf = bytes.subarray(start).toString('utf8');
+function ensureTerminalState(slot, sessionId) {
+  let state = slot.terminalStates.get(sessionId);
+  if (!state) {
+    state = new TerminalState({
+      scrollbackRows: SCROLLBACK_LIMIT_ROWS,
+      maxSnapshotBytes: SCROLLBACK_LIMIT_BYTES,
+    });
+    slot.terminalStates.set(sessionId, state);
   }
-  slot.scrollback.set(sessionId, buf);
+  return state;
+}
+
+function disposeTerminalState(slot, sessionId) {
+  const state = slot.terminalStates.get(sessionId);
+  if (!state) return;
+  slot.terminalStates.delete(sessionId);
+  state.dispose();
+}
+
+function disposeAllTerminalStates(slot) {
+  for (const [, state] of slot.terminalStates) state.dispose();
+  slot.terminalStates.clear();
+}
+
+/** 只向明确订阅该会话的浏览器发送终端输出。 */
+function publishTerminalOutput(token, output) {
+  for (const [, browser] of browserClients) {
+    if (browser.token !== token) continue;
+    const subscription = browser.subscriptions.get(output.sessionId);
+    if (!subscription) continue;
+
+    if (subscription.syncing) {
+      if (!subscription.overflowed) {
+        subscription.pending.push(output);
+        subscription.pendingBytes += byteLength(output.data);
+        if (subscription.pendingBytes > MAX_SYNC_PENDING_BYTES) {
+          // 持续刷屏时不无限堆积。同步任务会再取一个更靠后的完整快照。
+          subscription.pending = [];
+          subscription.pendingBytes = 0;
+          subscription.overflowed = true;
+        }
+      }
+      continue;
+    }
+    safeSend(browser.ws, JSON.stringify(output));
+  }
+}
+
+/**
+ * 发送一个精确序列边界的完整终端快照，并无缝接上同步期间产生的实时输出。
+ */
+async function synchronizeBrowserTerminal(browser, sessionId) {
+  const slot = agents.get(browser.token);
+  const knownSession = slot && slot.sessions.some((session) => session.id === sessionId);
+  if (!slot || !knownSession) {
+    safeSend(browser.ws, JSON.stringify({
+      type: 'terminal_error',
+      sessionId,
+      message: '终端不存在或已关闭',
+    }));
+    return;
+  }
+
+  const terminalState = ensureTerminalState(slot, sessionId);
+  const subscription = {
+    syncing: true,
+    pending: [],
+    pendingBytes: 0,
+    overflowed: false,
+  };
+  browser.subscriptions.set(sessionId, subscription);
+
+  try {
+    // 如同步期间输出超过内存上限，则丢弃中间队列并重取较新的状态；不会
+    // 把不完整数据交给浏览器，也不会让一次大输出卡死页面。
+    let snapshot;
+    do {
+      subscription.overflowed = false;
+      subscription.pending = [];
+      subscription.pendingBytes = 0;
+      snapshot = await terminalState.snapshot();
+      if (browser.subscriptions.get(sessionId) !== subscription) return;
+    } while (subscription.overflowed);
+
+    const snapshotMessage = browser.protocolVersion >= 2
+      ? {
+          type: 'terminal_snapshot',
+          sessionId,
+          data: snapshot.data,
+          seq: snapshot.sequence,
+          cols: snapshot.cols,
+          rows: snapshot.rows,
+          historyTruncated: snapshot.historyTruncated,
+        }
+      : {
+          // 滚动发布期间已打开的旧页面仍可恢复画面；刷新后会自动使用 v2。
+          type: 'terminal_output',
+          sessionId,
+          data: snapshot.data,
+          replay: true,
+          seq: snapshot.sequence,
+        };
+    if (!safeSend(browser.ws, JSON.stringify(snapshotMessage))) return;
+
+    const pending = subscription.pending.filter((item) => item.seq > snapshot.sequence);
+    subscription.pending = [];
+    subscription.pendingBytes = 0;
+    subscription.syncing = false;
+    let latestSequence = snapshot.sequence;
+    for (const output of pending) {
+      latestSequence = output.seq;
+      if (!safeSend(browser.ws, JSON.stringify(output))) return;
+    }
+    safeSend(browser.ws, JSON.stringify({
+      type: 'terminal_attached',
+      sessionId,
+      seq: latestSequence,
+    }));
+  } catch (err) {
+    if (browser.subscriptions.get(sessionId) === subscription) {
+      browser.subscriptions.delete(sessionId);
+      safeSend(browser.ws, JSON.stringify({
+        type: 'terminal_error',
+        sessionId,
+        message: '终端状态同步失败，请重试',
+      }));
+    }
+    console.error(`⚠  终端状态同步失败 (${sessionId}):`, err.message);
+  }
 }
 
 function isLoopbackAddress(addr) {
@@ -341,6 +481,8 @@ function sanitizeBrowserMessage(data) {
     case 'terminal_delete':
       return { ok: true, data: { type, sessionId: data.sessionId, deleteFiles: data.deleteFiles === true } };
     case 'terminal_attach':
+    case 'terminal_resync':
+    case 'terminal_detach':
       return { ok: true, data: { type, sessionId: data.sessionId } };
     default:
       return { ok: false, sessionId: data.sessionId, message: 'Unknown message type' };
@@ -482,22 +624,34 @@ wss.on('connection', (ws, req) => {
       if (data.role === 'agent') {
         clientType = 'agent';
         const slot = ensureAgentSlot(boundToken, result.name);
-        // 同一 Token 的新 Agent 踢掉旧连接
+        // 保留先到且仍健康的 Agent，拒绝后来者。这样重复部署不会让两个
+        // Agent 互相踢下线；旧连接若为半开，心跳清理后新连接即可接管。
         if (slot.ws && slot.ws !== ws && slot.ws.readyState === 1) {
-          slot.ws.close(4000, 'New agent connected for this token');
+          safeSend(ws, JSON.stringify({ type: 'error', message: 'Agent already connected' }));
+          ws.close(4000, 'Agent already connected for this token');
+          return;
         }
         slot.ws = ws;
         // Agent 重连，取消残留会话清理定时器
         cancelDisconnectedCleanup(boundToken);
         console.log(`🤖 Agent 已连接: ${result.name || boundToken.slice(0,8)} (token: ${boundToken.slice(0,8)}…)`);
-        safeSend(ws, JSON.stringify({ type: 'auth_ok', role: 'agent' }));
+        safeSend(ws, JSON.stringify({
+          type: 'auth_ok',
+          role: 'agent',
+          maxTerminalStateBytes: MAX_AGENT_STATE_BYTES,
+        }));
         // 通知该 Token 的浏览器：Agent 上线
         broadcastToBrowsers(boundToken, { type: 'agent_status', online: true, agentName: slot.name });
         // 请求 Agent 上报会话（Agent 重新上报后会覆盖服务器缓存的旧列表）
         sendToAgent(boundToken, { type: 'terminal_list' });
       } else {
         clientType = 'browser';
-        browserClients.set(clientId, { ws, token: boundToken });
+        browserClients.set(clientId, {
+          ws,
+          token: boundToken,
+          protocolVersion: data.protocolVersion === 2 ? 2 : 1,
+          subscriptions: new Map(),
+        });
         const slot = agents.get(boundToken);
         const agentOnline = !!(slot && slot.ws && slot.ws.readyState === 1);
         console.log(`🌐 浏览器已连接: ${clientId} → ${result.name || boundToken.slice(0,8)} (共 ${countBrowsersFor(boundToken)} 个)`);
@@ -512,6 +666,7 @@ wss.on('connection', (ws, req) => {
           agentName: slot ? slot.name : result.name,
           agentOnline,
           sessions: browserSessions,
+          protocolVersion: 2,
         }));
       }
       return;
@@ -550,9 +705,12 @@ wss.on('connection', (ws, req) => {
               break;
             }
           }
-          if (msg.type === 'terminal_delete') {
+          if (msg.type === 'terminal_resize') {
             const slot = agents.get(boundToken);
-            if (slot) slot.scrollback.delete(msg.sessionId);
+            const state = slot && slot.terminalStates.get(msg.sessionId);
+            if (state) state.resize(msg.cols, msg.rows).catch((err) => {
+              console.warn(`⚠  终端状态 resize 失败 (${msg.sessionId}):`, err.message);
+            });
           }
           const ok = sendToAgent(boundToken, msg);
           if (!ok) {
@@ -564,15 +722,15 @@ wss.on('connection', (ws, req) => {
           }
           break;
         }
-        case 'terminal_attach': {
-          const slot = agents.get(boundToken);
-          if (slot) {
-            const buf = slot.scrollback.get(msg.sessionId);
-            if (buf) {
-              safeSend(ws, JSON.stringify({ type: 'terminal_output', sessionId: msg.sessionId, data: buf, replay: true }));
-            }
-          }
-          safeSend(ws, JSON.stringify({ type: 'terminal_attached', sessionId: msg.sessionId }));
+        case 'terminal_attach':
+        case 'terminal_resync': {
+          const browser = browserClients.get(clientId);
+          if (browser) void synchronizeBrowserTerminal(browser, msg.sessionId);
+          break;
+        }
+        case 'terminal_detach': {
+          const browser = browserClients.get(clientId);
+          if (browser) browser.subscriptions.delete(msg.sessionId);
           break;
         }
         case 'ping':
@@ -597,28 +755,94 @@ wss.on('connection', (ws, req) => {
             data: data.data,
             ...(data.recovered === true ? { recovered: true } : {}),
           };
-          appendScrollback(boundToken, output.sessionId, output.data);
-          broadcastToBrowsers(boundToken, output);
+          const slot = ensureAgentSlot(boundToken);
+          const state = ensureTerminalState(slot, output.sessionId);
+          const appended = state.append(output.data);
+          output.seq = appended.sequence;
+          appended.completion.catch((err) => {
+            console.error(`⚠  终端输出解析失败 (${output.sessionId}):`, err.message);
+          });
+          publishTerminalOutput(boundToken, output);
           break;
         }
-        case 'terminal_created':
+        case 'terminal_state': {
+          if (!validSessionId(data.sessionId) || typeof data.data !== 'string' ||
+              byteLength(data.data) > MAX_AGENT_STATE_BYTES) {
+            safeSend(ws, JSON.stringify({ type: 'error', message: 'Invalid terminal state' }));
+            break;
+          }
+          const cols = Math.max(2, Math.min(MAX_COLS, Number.parseInt(data.cols, 10) || 120));
+          const rows = Math.max(2, Math.min(MAX_ROWS, Number.parseInt(data.rows, 10) || 30));
+          const slot = ensureAgentSlot(boundToken);
+          const state = ensureTerminalState(slot, data.sessionId);
+          const restored = state.restore(data.data, cols, rows);
+          restored.completion.catch((err) => {
+            console.error(`⚠  Agent 终端状态恢复失败 (${data.sessionId}):`, err.message);
+          });
+          // 立即把现有订阅切到 syncing；其快照操作排在 restore 之后，
+          // 后续实时输出则会被无缝缓冲到该快照之后。
+          for (const [, browser] of browserClients) {
+            if (browser.token === boundToken && browser.subscriptions.has(data.sessionId)) {
+              void synchronizeBrowserTerminal(browser, data.sessionId);
+            }
+          }
+          break;
+        }
         case 'terminal_exit':
-        case 'terminal_closed':
         case 'terminal_error':
         case 'stream':
         case 'status':
         case 'error':
           if (data.sessionId !== undefined && !validSessionId(data.sessionId)) break;
-          if (data.type === 'terminal_closed') {
-            const slot = agents.get(boundToken);
-            if (slot) slot.scrollback.delete(data.sessionId);
+          broadcastToBrowsers(boundToken, data);
+          break;
+        case 'terminal_created': {
+          if (!validSessionId(data.sessionId)) break;
+          const slot = ensureAgentSlot(boundToken);
+          ensureTerminalState(slot, data.sessionId);
+          const createdSession = sanitizeSession({
+            id: data.sessionId,
+            title: data.title,
+            cwd: data.cwd,
+            pid: data.pid,
+            status: data.status,
+            createdAt: data.createdAt,
+          });
+          if (createdSession) {
+            const existingIndex = slot.sessions.findIndex((session) => session.id === data.sessionId);
+            if (existingIndex >= 0) slot.sessions[existingIndex] = createdSession;
+            else if (slot.sessions.length < MAX_SESSIONS_PER_AGENT) slot.sessions.push(createdSession);
           }
           broadcastToBrowsers(boundToken, data);
           break;
+        }
+        case 'terminal_closed': {
+          if (!validSessionId(data.sessionId)) break;
+          const slot = agents.get(boundToken);
+          if (slot) {
+            disposeTerminalState(slot, data.sessionId);
+            slot.sessions = slot.sessions.filter((session) => session.id !== data.sessionId);
+          }
+          for (const [, browser] of browserClients) {
+            if (browser.token === boundToken) browser.subscriptions.delete(data.sessionId);
+          }
+          broadcastToBrowsers(boundToken, data);
+          break;
+        }
         case 'sessions': {
           const slot = agents.get(boundToken);
           if (slot) {
             slot.sessions = sanitizeSessionList(data.sessions);
+            const sessionIds = new Set(slot.sessions.map((session) => session.id));
+            for (const sessionId of sessionIds) ensureTerminalState(slot, sessionId);
+            for (const [sessionId] of slot.terminalStates) {
+              if (!sessionIds.has(sessionId)) {
+                disposeTerminalState(slot, sessionId);
+                for (const [, browser] of browserClients) {
+                  if (browser.token === boundToken) browser.subscriptions.delete(sessionId);
+                }
+              }
+            }
             broadcastToBrowsers(boundToken, { type: 'sessions', sessions: slot.sessions });
           }
           break;
@@ -734,6 +958,7 @@ function shutdown(signal) {
   clearInterval(heartbeatTimer);
   for (const [, slot] of agents) {
     if (slot.cleanupTimer) clearTimeout(slot.cleanupTimer);
+    disposeAllTerminalStates(slot);
   }
   for (const [, b] of browserClients) b.ws.close(1001, 'Server shutting down');
   for (const [, slot] of agents) { if (slot.ws) slot.ws.close(1001, 'Server shutting down'); }
