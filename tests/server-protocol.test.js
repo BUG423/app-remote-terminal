@@ -155,19 +155,23 @@ function noMatchingMessage(ws, predicate, waitMs = 150) {
 
   await waitForHealth();
 
-  const indexPage = await httpGet('/');
-  check('页面启用 CSP 且隐藏 Express 标识',
-    indexPage.headers['content-security-policy']?.includes("default-src 'self'") &&
-    !indexPage.headers['x-powered-by']);
-  check('页面不依赖公共 CDN',
-    indexPage.body.includes('/vendor/xterm.js') && !indexPage.body.includes('cdn.jsdelivr.net'));
-  const xtermAsset = await httpGet('/vendor/xterm.js');
-  const fitAsset = await httpGet('/vendor/addon-fit.js');
-  const unicodeAsset = await httpGet('/vendor/addon-unicode11.js');
-  check('xterm、FitAddon 与 Unicode11Addon 由本机 Server 提供',
-    xtermAsset.status === 200 && xtermAsset.body.includes('Terminal') &&
-    fitAsset.status === 200 && fitAsset.body.includes('FitAddon') &&
-    unicodeAsset.status === 200 && unicodeAsset.body.includes('Unicode11Addon'));
+  const health = await httpGet('/health');
+  check('网页端下架后健康检查仍正常',
+    health.status === 200 && JSON.parse(health.body).status === 'ok');
+
+  const retiredPaths = ['/', '/index.html', '/app.js', '/style.css', '/vendor/xterm.js'];
+  const retiredResponses = await Promise.all(retiredPaths.map(httpGet));
+  check('网页入口及静态资源均返回 410 Gone',
+    retiredResponses.every((response) => response.status === 410));
+  check('下架响应不再泄露网页资源且具有明确机器码',
+    retiredResponses.every((response) => {
+      const body = JSON.parse(response.body);
+      return body.code === 'WEB_UI_RETIRED' && !response.body.includes('/vendor/xterm.js');
+    }));
+  check('下架响应保留安全头且隐藏 Express 标识',
+    retiredResponses.every((response) =>
+      response.headers['content-security-policy']?.includes("default-src 'self'") &&
+      !response.headers['x-powered-by']));
 
   const invalidRole = await connect('__bad_role__');
   check('无效 role 被拒绝', invalidRole.msg.type === 'error' && invalidRole.msg.message === 'Invalid role');

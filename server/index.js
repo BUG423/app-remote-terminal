@@ -145,24 +145,21 @@ app.use((_req, res, next) => {
   res.setHeader('Cache-Control', 'no-store');
   next();
 });
-app.get('/vendor/xterm.js', (_req, res) => {
-  res.sendFile(path.join(__dirname, 'node_modules', '@xterm', 'xterm', 'lib', 'xterm.js'));
-});
-app.get('/vendor/xterm.css', (_req, res) => {
-  res.sendFile(path.join(__dirname, 'node_modules', '@xterm', 'xterm', 'css', 'xterm.css'));
-});
-app.get('/vendor/addon-fit.js', (_req, res) => {
-  res.sendFile(path.join(__dirname, 'node_modules', '@xterm', 'addon-fit', 'lib', 'addon-fit.js'));
-});
-app.get('/vendor/addon-unicode11.js', (_req, res) => {
-  res.sendFile(path.join(__dirname, 'node_modules', '@xterm', 'addon-unicode11', 'lib', 'addon-unicode11.js'));
-});
-app.use(express.static(path.join(__dirname, 'public')));
 app.get('/health', (_req, res) => {
   if (config.healthDetails !== true) return res.json({ status: 'ok' });
   let agentCount = 0;
   for (const [, a] of agents) { if (a.ws && a.ws.readyState === 1) agentCount++; }
   res.json({ status: 'ok', tokenMode, tokenCount, agentCount, agentsOnline: agentCount });
+});
+
+// 浏览器网页端已下架。Android/桌面客户端会在安装包内加载同一套前端资源，
+// 并直接通过下方 WebSocket Server 连接中转，因此这里无需公开任何静态文件。
+app.use((_req, res) => {
+  res.status(410).json({
+    status: 'gone',
+    code: 'WEB_UI_RETIRED',
+    message: '浏览器网页端已下线，请使用 Android 或桌面客户端。',
+  });
 });
 
 // ─── HTTP / HTTPS 服务器 ──────────────────────────────────────────
