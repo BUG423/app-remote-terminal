@@ -3,8 +3,8 @@
  * Web-Claude 端到端测试套件（模拟浏览器，覆盖核心需求与重点排查项）
  *
  * 用法：
- *   TARGET=ws://你的服务器:3000 CLAUDE_WEB_TOKEN=xxx node tests/e2e.js
- *   （默认 TARGET=ws://127.0.0.1:3000，token 从 ../config.json 读取）
+ *   TARGET=ws://127.0.0.1:3002 CLAUDE_WEB_TOKEN=xxx node tests/e2e.js
+ *   （默认使用本机测试 Relay，token 从 ../config.json 读取）
  *
  * 需要：目标 Server 在线 + 本地 Agent 已连接该 Server。
  * 它模拟前端的 attach/detach 与 attached 去重逻辑，逐项断言并打分。

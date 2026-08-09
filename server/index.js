@@ -1,13 +1,13 @@
 /**
  * ═══════════════════════════════════════════════════════════════
- * Claude Web — 云端中继服务器（多 Agent 架构）
+ * Remote Terminal — 云端中继服务器（多 Agent 架构）
  *
- * 三方消息流：  浏览器 ⇄ Server ⇄ 本地 Agent
+ * 三方消息流：  客户端 ⇄ Relay ⇄ 本地 Agent
  *
  * Server 负责：
- *   - 角色分离鉴权：浏览器与 Agent 使用不同凭据并路由到同一设备
- *   - 转发浏览器 → Agent 的控制消息（创建/输入/resize/删除会话）
- *   - 广播 Agent → 浏览器 的输出与状态（仅限同 Token 的浏览器）
+ *   - 角色分离鉴权：客户端与 Agent 使用不同凭据并路由到同一设备
+ *   - 转发客户端 → Agent 的控制消息（创建/输入/resize/删除会话）
+ *   - 广播 Agent → 客户端的输出与状态（仅限同 Token 的客户端）
  *   - 维护每 Agent 的会话列表缓存 + 每会话输出滚动缓冲
  * ═══════════════════════════════════════════════════════════════
  */
@@ -16,7 +16,6 @@ const http = require('http');
 const https = require('https');
 const path = require('path');
 const fs = require('fs');
-const express = require('express');
 const { WebSocketServer } = require('ws');
 const { createAuthMiddleware } = require('./auth');
 const rateLimiter = require('./rate-limiter');
@@ -65,6 +64,7 @@ function positiveInt(value, fallback, min, max) {
 const PORT = positiveInt(process.env.CW_PORT || config.port, 3002, 1, 65535);
 const BIND_HOST = config.bindHost || '127.0.0.1';
 const USE_TLS = config.useTLS === true;
+const ENABLE_HTTP_REDIRECT = USE_TLS && config.enableHttpRedirect === true;
 const TLS_OPTIONS = USE_TLS ? (() => {
   try {
     const cert = fs.readFileSync(config.tlsCertPath, 'utf-8');
@@ -123,59 +123,80 @@ const MAX_SYNC_PENDING_BYTES = positiveInt(
 );
 const ENABLE_LEGACY_CHAT = config.enableLegacyChat === true;
 
-// ─── Express ────────────────────────────────────────────────────
-const app = express();
-app.disable('x-powered-by');
-app.use((_req, res, next) => {
-  res.setHeader('X-Content-Type-Options', 'nosniff');
-  res.setHeader('X-Frame-Options', 'DENY');
-  res.setHeader('Referrer-Policy', 'no-referrer');
-  res.setHeader('Permissions-Policy', 'camera=(), microphone=(), geolocation=()');
-  res.setHeader('Content-Security-Policy', [
-    "default-src 'self'",
-    "script-src 'self'",
-    "style-src 'self' 'unsafe-inline'",
-    "img-src 'self' data:",
-    "connect-src 'self' ws: wss:",
-    "object-src 'none'",
-    "base-uri 'none'",
-    "form-action 'self'",
-    "frame-ancestors 'none'",
-  ].join('; '));
-  res.setHeader('Cache-Control', 'no-store');
-  next();
-});
-app.get('/health', (_req, res) => {
-  if (config.healthDetails !== true) return res.json({ status: 'ok' });
-  let agentCount = 0;
-  for (const [, a] of agents) { if (a.ws && a.ws.readyState === 1) agentCount++; }
-  res.json({ status: 'ok', tokenMode, tokenCount, agentCount, agentsOnline: agentCount });
-});
+// ─── 极简 HTTP 控制面 ───────────────────────────────────────────
+// 安装包内自带完整 UI，云端只保留健康检查和 WebSocket 中转。
+function sendJson(req, res, statusCode, payload) {
+  const body = Buffer.from(JSON.stringify(payload));
+  const headers = {
+    'Content-Type': 'application/json; charset=utf-8',
+    'Content-Length': body.length,
+    'Cache-Control': 'no-store',
+    'X-Content-Type-Options': 'nosniff',
+    'X-Frame-Options': 'DENY',
+    'Referrer-Policy': 'no-referrer',
+    'Permissions-Policy': 'camera=(), microphone=(), geolocation=()',
+    'Content-Security-Policy': "default-src 'none'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'",
+  };
+  if (USE_TLS) headers['Strict-Transport-Security'] = 'max-age=63072000; includeSubDomains';
+  res.writeHead(statusCode, headers);
+  if (req.method === 'HEAD') res.end();
+  else res.end(body);
+}
 
-// 浏览器网页端已下架。Android/桌面客户端会在安装包内加载同一套前端资源，
-// 并直接通过下方 WebSocket Server 连接中转，因此这里无需公开任何静态文件。
-app.use((_req, res) => {
-  res.status(410).json({
+function handleHttpRequest(req, res) {
+  let pathname = '';
+  try {
+    pathname = new URL(req.url || '/', 'http://relay.invalid').pathname;
+  } catch {
+    sendJson(req, res, 400, { status: 'error', code: 'INVALID_REQUEST' });
+    return;
+  }
+
+  if ((req.method === 'GET' || req.method === 'HEAD') && pathname === '/health') {
+    if (config.healthDetails !== true) {
+      sendJson(req, res, 200, { status: 'ok' });
+      return;
+    }
+    let agentCount = 0;
+    for (const [, agent] of agents) {
+      if (agent.ws && agent.ws.readyState === 1) agentCount++;
+    }
+    sendJson(req, res, 200, {
+      status: 'ok', tokenMode, tokenCount, agentCount, agentsOnline: agentCount,
+    });
+    return;
+  }
+
+  sendJson(req, res, 410, {
     status: 'gone',
     code: 'WEB_UI_RETIRED',
     message: '浏览器网页端已下线，请使用 Android 或桌面客户端。',
   });
-});
+}
 
 // ─── HTTP / HTTPS 服务器 ──────────────────────────────────────────
 let server;
 let redirectServer = null;
 
 if (USE_TLS) {
-  server = https.createServer(TLS_OPTIONS, app);
-  redirectServer = http.createServer((req, res) => {
-    const host = req.headers.host || '';
-    const target = `https://${host.replace(/:\d+$/, '')}:${PORT}${req.url}`;
-    res.writeHead(301, { Location: target });
-    res.end();
-  });
+  server = https.createServer(TLS_OPTIONS, handleHttpRequest);
+  if (ENABLE_HTTP_REDIRECT) {
+    redirectServer = http.createServer((req, res) => {
+      const configuredHost = typeof config.publicHost === 'string' ? config.publicHost.trim() : '';
+      const requestHost = String(req.headers.host || '').replace(/:\d+$/, '');
+      const host = configuredHost || requestHost;
+      if (!host || !/^[A-Za-z0-9.-]+$/.test(host)) {
+        res.writeHead(400, { 'Content-Type': 'text/plain; charset=utf-8', 'Cache-Control': 'no-store' });
+        res.end('Invalid Host');
+        return;
+      }
+      const portSuffix = PORT === 443 ? '' : `:${PORT}`;
+      res.writeHead(308, { Location: `https://${host}${portSuffix}${req.url || '/'}` });
+      res.end();
+    });
+  }
 } else {
-  server = http.createServer(app);
+  server = http.createServer(handleHttpRequest);
 }
 
 const MAX_WS_PAYLOAD_BYTES = positiveInt(process.env.CW_MAX_WS_PAYLOAD_BYTES, 1024 * 1024, 64 * 1024, 8 * 1024 * 1024);
@@ -192,6 +213,9 @@ const MAX_COLS = 300;
 const MAX_ROWS = 100;
 
 const wss = new WebSocketServer({ server, maxPayload: MAX_WS_PAYLOAD_BYTES });
+wss.on('error', (err) => {
+  console.error(`❌ WebSocket Server 错误: ${err.message}`);
+});
 
 // ─── 连接状态（多 Agent 架构）──────────────────────────────────────
 // token → { ws, name, sessions, terminalStates: Map<sessionId, TerminalState>, cleanupTimer }
@@ -416,14 +440,8 @@ async function synchronizeBrowserTerminal(browser, sessionId) {
   }
 }
 
-function isLoopbackAddress(addr) {
-  return ['127.0.0.1', '::1', '::ffff:127.0.0.1'].includes(addr);
-}
-
 function getClientIp(req) {
-  const remote = req.socket.remoteAddress || 'unknown';
-  const realIp = (req.headers['x-real-ip'] || '').trim();
-  return isLoopbackAddress(remote) && realIp ? realIp : remote;
+  return req.socket.remoteAddress || 'unknown';
 }
 
 function byteLength(value) {
@@ -520,8 +538,7 @@ wss.on('connection', (ws, req) => {
     ws.close(1013, 'Server connection limit reached');
     return;
   }
-  // 只在连接来自本机反向代理时信任 X-Real-IP；直连 Node 端口时使用真实 socket 地址。
-  // 这样即使误把 Node 端口暴露到公网，客户端也不能伪造 X-Real-IP 绕过速率限制。
+  // Relay 直连公网 TLS，只使用 socket 对端地址，不信任可伪造的转发头。
   const clientIp = getClientIp(req);
   console.log(`🔗 新连接: ${clientId} from ${clientIp} (agent=${req.headers['user-agent']?.slice(0,40)||'?'})`);
 
@@ -919,7 +936,7 @@ server.listen(PORT, BIND_HOST, () => {
   const rl = rateLimiter.stats();
   console.log('');
   console.log('╔══════════════════════════════════════════╗');
-  console.log('║         Claude Web Server 🚀             ║');
+  console.log('║       Remote Terminal Relay 🚀           ║');
   console.log(`║  ${proto} 监听 ${String(BIND_HOST + ':' + PORT).padEnd(24)}║`);
   const authLabel = tokenMode === 'devices'
     ? `角色分离 (${tokenCount}台)`

@@ -1,0 +1,32 @@
+{
+  "name": "remote-terminal-desktop",
+  "version": "0.1.0",
+  "private": true,
+  "author": "Remote Terminal",
+  "desktopName": "Remote Terminal",
+  "description": "Remote Terminal desktop client",
+  "main": "main.js",
+  "scripts": {
+    "prepare:ui": "node ../prepare-client-ui.js ./ui",
+    "start": "npm run prepare:ui && electron .",
+    "smoke": "npm run prepare:ui && node scripts/smoke.js",
+    "dist": "npm run prepare:ui && electron-builder",
+    "dist:win": "npm run prepare:ui && electron-builder --win nsis --x64",
+    "dist:win:cross": "npm run prepare:ui && electron-builder --win nsis --x64 -c.win.signAndEditExecutable=false",
+    "dist:win:zip": "npm run prepare:ui && electron-builder --win zip --x64 -c.win.signAndEditExecutable=false",
+    "dist:mac": "npm run prepare:ui && electron-builder --mac dmg"
+  },
+  "devDependencies": {
+    "electron": "^36.0.0",
+    "electron-builder": "^26.0.12"
+  },
+  "build": {
+    "appId": "cn.remoteterminal.desktop",
+    "productName": "Remote Terminal",
+    "files": ["main.js", "preload.js", "ui/www/**/*"],
+    "directories": { "output": "dist" },
+    "linux": { "target": ["AppImage"], "category": "Network", "syncDesktopName": true },
+    "win": { "target": ["nsis"] },
+    "mac": { "target": ["dmg"] }
+  }
+}

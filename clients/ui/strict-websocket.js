@@ -19,7 +19,7 @@
       this.reconnectAttempts = 0;
       this.reconnectEnabled = true;
       this.authenticated = false;
-      // Browser timer functions require the Window receiver in some engines.
+      // WebView timer functions require the Window receiver in some engines.
       // Calling a raw `setTimeout` stored as an object method can throw
       // "Illegal invocation", so always invoke captured functions lexically.
       const scheduleTimer = options.setTimer || setTimeout;

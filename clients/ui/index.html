@@ -1,0 +1,233 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="theme-color" content="#f5f6f8">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self' file:; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src ws: wss:; object-src 'none'; frame-src 'none'; base-uri 'none'">
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <title>Remote Terminal</title>
+  <link rel="manifest" href="./manifest.webmanifest">
+  <link rel="stylesheet" href="./vendor/xterm.css">
+  <link rel="stylesheet" href="./style.css?v=20260806c">
+</head>
+<body>
+  <!-- ── 登录 ──────────────────────────────────────────────── -->
+  <div id="login-screen" class="screen">
+    <div class="login-card">
+      <div class="login-icon" aria-hidden="true"><span>&gt;_</span></div>
+      <h1>Remote Terminal</h1>
+      <p class="login-subtitle">随时连接你的远程终端</p>
+      <form id="login-form">
+        <div id="relay-url-field" class="hidden">
+          <label for="relay-url-input">阿里云中转地址</label>
+          <input type="url" id="relay-url-input" placeholder="wss://terminal.example.cn" autocomplete="url" inputmode="url">
+        </div>
+        <label for="token-input">访问 Token</label>
+        <input type="password" id="token-input" placeholder="输入访问 Token..." autocomplete="current-password">
+        <label id="remember-token-row" class="login-check hidden"><input id="remember-token" type="checkbox"> <span>在本机安全保存 Token</span></label>
+        <button type="submit" id="login-btn">连接并进入</button>
+      </form>
+      <p id="login-error" class="error-msg hidden"></p>
+    </div>
+  </div>
+
+  <!-- ── 主界面 ────────────────────────────────────────────── -->
+  <div id="main-screen" class="screen hidden" data-mobile-view="sessions">
+    <!-- 侧栏：会话列表 -->
+    <aside id="sidebar">
+      <div class="sidebar-header">
+        <div class="brand-wrap">
+          <span class="brand desktop-brand"><span class="brand-mark">&gt;_</span> Remote Terminal</span>
+          <div class="mobile-brand mobile-only">
+            <h1>终端</h1>
+            <span id="mobile-session-count">0 个会话</span>
+          </div>
+        </div>
+        <div class="sidebar-actions">
+          <button id="settings-btn" class="desktop-only icon-button" title="客户端设置" aria-label="客户端设置">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 8.5A3.5 3.5 0 1 0 12 15a3.5 3.5 0 0 0 0-7Zm8.3 4.9-1.7 1 .1 2-2.7 1.6-1.8-.9-1.7 1.1-.1 2H9.3l-.1-2-1.7-1.1-1.8.9L3 16.4l.1-2-1.7-1v-2.8l1.7-1-.1-2L5.7 6l1.8.9 1.7-1.1.1-2h3.1l.1 2 1.7 1.1L16 6l2.7 1.6-.1 2 1.7 1v2.8Z"/></svg>
+          </button>
+          <button id="new-session-btn" class="icon-button primary-icon" title="新建会话" aria-label="新建会话">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>
+          </button>
+        </div>
+      </div>
+      <button id="mobile-agent-banner" class="mobile-agent-banner mobile-only" type="button">
+        <span id="mobile-agent-dot" class="status-dot offline"></span>
+        <span class="mobile-agent-copy"><strong id="mobile-agent-title">设备未连接</strong><small id="mobile-agent-subtitle">点此查看连接状态</small></span>
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m9 6 6 6-6 6"/></svg>
+      </button>
+      <div class="session-search-wrap">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m20 20-4.5-4.5m2.5-5A7.5 7.5 0 1 1 3 10.5a7.5 7.5 0 0 1 15 0Z"/></svg>
+        <input id="session-search" type="search" placeholder="搜索会话" autocomplete="off" aria-label="搜索会话">
+        <kbd class="desktop-only">Ctrl ⇧ K</kbd>
+      </div>
+      <ul id="session-list"></ul>
+      <div class="sidebar-footer desktop-only">
+        <span id="agent-status" class="status-dot offline"></span>
+        <span id="agent-label">Agent 离线</span>
+      </div>
+    </aside>
+
+    <!-- 主区：终端 -->
+    <main id="workspace">
+      <header id="terminal-header">
+        <div class="th-left">
+          <button id="mobile-back-btn" class="mobile-only header-icon-button" title="返回会话列表" aria-label="返回会话列表">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m15 5-7 7 7 7"/></svg>
+          </button>
+          <div class="active-heading">
+            <span id="active-title">未选择会话</span>
+            <span id="active-cwd" class="cwd"></span>
+          </div>
+        </div>
+        <div class="th-right">
+          <button id="tile-view-btn" title="分屏显示多个终端" disabled>📐 分屏</button>
+          <span id="active-status" class="badge"></span>
+          <button id="delete-session-btn" class="danger" title="删除当前会话" disabled>删除</button>
+          <button id="mobile-session-more" class="mobile-only header-icon-button" title="会话操作" aria-label="会话操作">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="5" cy="12" r="1.6"/><circle cx="12" cy="12" r="1.6"/><circle cx="19" cy="12" r="1.6"/></svg>
+          </button>
+        </div>
+      </header>
+      <div id="terminals">
+        <div id="empty-hint" class="empty-hint">
+          <div class="empty-icon">⌨️</div>
+          <p>新建一个会话，开始操作远程终端</p>
+        </div>
+      </div>
+      <nav id="mobile-keybar" class="mobile-only" aria-label="终端快捷键">
+        <button data-key="CTRL">Ctrl</button><button data-key="ALT">Alt</button>
+        <button data-key="ESC">Esc</button><button data-key="TAB">Tab</button>
+        <button data-key="ENTER">Enter</button>
+        <button data-key="ARROWLEFT">←</button><button data-key="ARROWUP">↑</button>
+        <button data-key="ARROWDOWN">↓</button><button data-key="ARROWRIGHT">→</button>
+        <button data-key="PASTE">粘贴</button>
+      </nav>
+      <form id="mobile-command-form" class="mobile-only" autocomplete="off">
+        <button id="mobile-direct-input" type="button" title="直接操作终端" aria-label="直接操作终端">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 6h16v12H4zM7 10l2 2-2 2m4 0h4"/></svg>
+        </button>
+        <input id="mobile-command-input" type="text" placeholder="输入命令…" enterkeyhint="send" autocapitalize="none" autocomplete="off" autocorrect="off" spellcheck="false" aria-label="输入命令">
+        <button id="mobile-command-send" type="submit">发送</button>
+      </form>
+    </main>
+
+    <section id="mobile-device-page" class="mobile-surface mobile-only" aria-labelledby="mobile-device-page-title">
+      <header class="mobile-page-header"><h1 id="mobile-device-page-title">设备</h1></header>
+      <div class="mobile-page-scroll">
+        <article class="device-card">
+          <div class="device-avatar"><span>&gt;_</span><i id="mobile-device-status-dot" class="offline"></i></div>
+          <div class="device-card-copy">
+            <h2 id="mobile-device-name">本地 Agent</h2>
+            <p id="mobile-device-state">当前离线</p>
+          </div>
+        </article>
+        <div class="mobile-group-title">连接信息</div>
+        <div class="mobile-list-group">
+          <div class="mobile-info-row"><span>连接状态</span><strong id="mobile-connection-state">未连接</strong></div>
+          <div class="mobile-info-row stacked"><span>阿里云中转</span><small id="mobile-relay-address">未配置</small></div>
+          <div class="mobile-info-row"><span>活动会话</span><strong id="mobile-running-count">0</strong></div>
+        </div>
+        <div class="mobile-list-group mobile-actions-group">
+          <button id="mobile-reconnect-btn" class="mobile-list-button" type="button"><span>立即重新连接</span><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 11a8 8 0 1 0-2.3 6M20 5v6h-6"/></svg></button>
+          <button id="mobile-connection-settings-btn" class="mobile-list-button" type="button"><span>连接与安全设置</span><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m9 6 6 6-6 6"/></svg></button>
+        </div>
+      </div>
+    </section>
+
+    <section id="mobile-profile-page" class="mobile-surface mobile-only" aria-labelledby="mobile-profile-page-title">
+      <header class="mobile-page-header"><h1 id="mobile-profile-page-title">我的</h1></header>
+      <div class="mobile-page-scroll">
+        <article class="profile-card">
+          <div class="profile-logo">&gt;_</div>
+          <div><h2>Remote Terminal</h2><p>安全、快速地管理远程终端</p></div>
+        </article>
+        <div class="mobile-list-group profile-actions">
+          <button id="mobile-open-settings" class="mobile-list-button" type="button"><span class="row-icon settings-icon">Aa</span><span>显示与终端设置</span><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m9 6 6 6-6 6"/></svg></button>
+          <button id="mobile-open-connection" class="mobile-list-button" type="button"><span class="row-icon security-icon">✓</span><span>连接与凭据</span><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m9 6 6 6-6 6"/></svg></button>
+          <div class="mobile-info-row"><span>客户端版本</span><small>0.2.2</small></div>
+        </div>
+        <button id="mobile-logout-btn" class="mobile-logout-button" type="button">退出登录</button>
+      </div>
+    </section>
+
+    <nav id="mobile-tabbar" class="mobile-only" aria-label="主导航">
+      <button class="active" data-mobile-tab="sessions" type="button" aria-current="page">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 5h14v11H9l-4 3V5Z"/></svg><span>终端</span>
+      </button>
+      <button data-mobile-tab="device" type="button">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="4" y="5" width="16" height="11" rx="2"/><path d="M9 20h6m-3-4v4"/></svg><span>设备</span>
+      </button>
+      <button data-mobile-tab="profile" type="button">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="8" r="3.5"/><path d="M5 20c.8-4 3.1-6 7-6s6.2 2 7 6"/></svg><span>我的</span>
+      </button>
+    </nav>
+  </div>
+
+  <!-- 删除确认弹窗 -->
+  <div id="delete-modal" class="modal hidden">
+    <div class="modal-card">
+      <h3>删除会话</h3>
+      <p id="delete-modal-text">确认删除该会话？终端进程将被终止。</p>
+      <div class="modal-actions">
+        <button id="delete-cancel" class="ghost">取消</button>
+        <button id="delete-confirm" class="danger">删除</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="settings-modal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="settings-title">
+    <div class="modal-card settings-card">
+      <div class="modal-heading"><h3 id="settings-title">客户端设置</h3><button id="settings-close" class="modal-close" type="button" aria-label="关闭">×</button></div>
+      <label id="setting-relay-row" class="setting-row setting-stacked hidden"><span>阿里云中转地址</span><input id="setting-relay-url" type="url" inputmode="url" autocomplete="url" placeholder="wss://terminal.example.cn"></label>
+      <label class="setting-row"><span>终端字号</span><input id="setting-font-size" type="number" min="11" max="24" step="1"></label>
+      <label class="setting-row"><span>回滚行数</span><input id="setting-scrollback" type="number" min="1000" max="20000" step="500"></label>
+      <label class="setting-row checkbox-row"><span>光标闪烁</span><input id="setting-cursor-blink" type="checkbox"></label>
+      <label class="setting-row checkbox-row"><span>显示手机快捷键栏</span><input id="setting-mobile-keybar" type="checkbox"></label>
+      <label class="setting-row checkbox-row"><span>大段粘贴前确认</span><input id="setting-paste-confirm" type="checkbox"></label>
+      <p id="settings-security-hint" class="settings-hint">中转地址保存在本机；访问 Token 默认只保存在当前运行会话。</p>
+      <div class="modal-actions spread">
+        <div><button id="settings-logout" class="ghost danger-text">退出登录</button><button id="settings-reset" class="ghost">恢复默认</button></div>
+        <div><button id="settings-cancel" class="ghost">取消</button><button id="settings-save" class="primary">保存</button></div>
+      </div>
+    </div>
+  </div>
+
+  <div id="session-actions-modal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="session-actions-title">
+    <div class="modal-card action-sheet">
+      <div class="action-sheet-handle mobile-only"></div>
+      <h3 id="session-actions-title">会话操作</h3>
+      <button id="action-pin-session" type="button">置顶会话</button>
+      <button id="action-new-session" type="button">新建会话</button>
+      <button id="action-delete-session" class="danger-text" type="button">删除当前会话</button>
+      <button id="action-sheet-cancel" class="action-sheet-cancel" type="button">取消</button>
+    </div>
+  </div>
+
+  <div id="paste-modal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="paste-title">
+    <div class="modal-card">
+      <h3 id="paste-title">确认粘贴</h3>
+      <p id="paste-modal-text"></p>
+      <div class="modal-actions">
+        <button id="paste-cancel" class="ghost">取消</button>
+        <button id="paste-confirm" class="primary">粘贴</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="toast" class="toast hidden" role="status" aria-live="polite"></div>
+
+  <!-- ── 脚本 ──────────────────────────────────────────────── -->
+  <script src="./vendor/xterm.js"></script>
+  <script src="./vendor/addon-fit.js"></script>
+  <script src="./vendor/addon-unicode11.js"></script>
+  <script src="./strict-websocket.js?v=20260804a"></script>
+  <script src="./terminal-stream.js?v=20260804a"></script>
+  <script src="./client-settings.js?v=20260806a"></script>
+  <script src="./app.js?v=20260806c"></script>
+</body>
+</html>

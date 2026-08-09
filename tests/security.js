@@ -1,6 +1,6 @@
 /**
  * ═══════════════════════════════════════════════════════════════
- * Claude Web — 安全测试套件
+ * Remote Terminal — 安全测试套件
  *
  * 用法：
  *   node tests/security.js
@@ -68,7 +68,7 @@ function quickConnect(token) {
 // ─── 测试用例 ────────────────────────────────────────────────────
 
 (async () => {
-  console.log(`\n🔒 Claude Web 安全测试`);
+  console.log(`\n🔒 Remote Terminal 安全测试`);
   console.log(`   目标: ${TARGET}`);
   console.log(`   Token: ${testToken.slice(0, 8)}…`);
 

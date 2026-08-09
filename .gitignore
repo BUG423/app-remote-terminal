@@ -3,4 +3,5 @@ config.json
 .env
 *.log
 .claude/
+.tools/
 REMOTE_SETUP.md

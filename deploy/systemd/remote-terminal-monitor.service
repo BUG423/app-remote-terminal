@@ -1,7 +1,7 @@
 [Unit]
 Description=Remote Terminal relay and remote Agent monitor
 Wants=network-online.target
-After=network-online.target nginx.service remote-terminal-server.service
+After=network-online.target remote-terminal-server.service
 
 [Service]
 Type=oneshot
@@ -43,4 +43,3 @@ IOSchedulingClass=idle
 TasksMax=32
 MemoryHigh=96M
 MemoryMax=128M
-

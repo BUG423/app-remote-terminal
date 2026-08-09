@@ -25,25 +25,29 @@ console.log('╚═════════════════════�
 
 test('config.json.example 是合法 JSON', () => {
   const config = JSON.parse(fs.readFileSync(path.join(root, 'config.json.example'), 'utf8'));
-  assert.equal(config.bindHost, '127.0.0.1');
+  assert.equal(config.bindHost, '0.0.0.0');
+  assert.equal(config.port, 443);
+  assert.equal(config.useTLS, true);
+  assert.equal(config.enableHttpRedirect, false);
   assert.equal(config.enableLegacyChat, false);
   const device = config.devices['server-a'];
   assert.notEqual(device.browserToken, device.agentToken);
   assert.equal(config.agentToken, device.agentToken);
 });
 
-for (const file of ['deploy.sh', 'start-local.sh', 'scripts/run-server-tests.sh']) {
+for (const file of ['deploy.sh', 'start-local.sh', 'scripts/run-server-tests.sh', 'scripts/install-relay-certificate.sh']) {
   test(`${file} 通过 bash 语法检查`, () => {
     const result = spawnSync('bash', ['-n', file], { cwd: root, encoding: 'utf8' });
     assert.equal(result.status, 0, result.stderr);
   });
 }
 
-test('部署脚本不上传密钥、不改防火墙和默认 Nginx 站点', () => {
+test('部署脚本不上传密钥、不改防火墙和系统入口配置', () => {
   const source = fs.readFileSync(path.join(root, 'deploy.sh'), 'utf8');
   assert(!/scp\s/i.test(source));
   assert(!/ufw\s/i.test(source));
   assert(!/sites-enabled\/default/.test(source));
+  assert(!/systemctl\s+(?:enable|disable)/.test(source));
 });
 
 test('部署脚本保留外置配置并复用现有进程管理器', () => {
@@ -58,13 +62,23 @@ test('部署脚本保留外置配置并复用现有进程管理器', () => {
   assert(source.includes('health check failed after 15 seconds'));
 });
 
-test('浏览器入口只引用 Server 本地依赖', () => {
-  const html = fs.readFileSync(path.join(root, 'server/public/index.html'), 'utf8');
-  assert(html.includes('/vendor/xterm.js'));
-  assert(html.includes('/vendor/addon-unicode11.js'));
-  assert(html.includes('/strict-websocket.js'));
-  assert(html.includes('/terminal-stream.js'));
+test('客户端 UI 只引用安装包内依赖', () => {
+  const html = fs.readFileSync(path.join(root, 'clients/ui/index.html'), 'utf8');
+  assert(html.includes('./vendor/xterm.js'));
+  assert(html.includes('./vendor/addon-unicode11.js'));
+  assert(html.includes('./strict-websocket.js'));
+  assert(html.includes('./terminal-stream.js'));
   assert(!/https?:\/\//.test(html));
+});
+
+test('云端 Relay 不包含网页目录或 Express 运行时', () => {
+  assert(!fs.existsSync(path.join(root, 'server/public')));
+  const source = fs.readFileSync(path.join(root, 'server/index.js'), 'utf8');
+  const serverPackage = JSON.parse(fs.readFileSync(path.join(root, 'server/package.json'), 'utf8'));
+  assert(!source.includes("require('express')"));
+  assert(!Object.hasOwn(serverPackage.dependencies, 'express'));
+  assert(!Object.hasOwn(serverPackage.dependencies, '@xterm/xterm'));
+  assert(!Object.hasOwn(serverPackage.dependencies, '@xterm/addon-fit'));
 });
 
 test('systemd 单元使用独立低权限账户和资源上限', () => {
@@ -73,10 +87,21 @@ test('systemd 单元使用独立低权限账户和资源上限', () => {
   assert(serverUnit.includes('User=remote-terminal-server'));
   assert(agentUnit.includes('User=remote-terminal-agent'));
   assert(serverUnit.includes('NoNewPrivileges=true'));
+  assert(serverUnit.includes('AmbientCapabilities=CAP_NET_BIND_SERVICE'));
+  assert(serverUnit.includes('CapabilityBoundingSet=CAP_NET_BIND_SERVICE'));
   assert(agentUnit.includes('NoNewPrivileges=true'));
   assert(serverUnit.includes('MemoryMax='));
   assert(agentUnit.includes('MemoryMax='));
   assert(agentUnit.includes('ReadWritePaths=/var/lib/remote-terminal-agent'));
+});
+
+test('证书安装脚本只发布受限权限副本并支持 Certbot hook', () => {
+  const source = fs.readFileSync(path.join(root, 'scripts/install-relay-certificate.sh'), 'utf8');
+  assert(source.includes('RENEWED_LINEAGE'));
+  assert(source.includes('/etc/remote-terminal/tls'));
+  assert(source.includes('-m 0640'));
+  assert(source.includes('remote-terminal-server'));
+  assert(!source.includes('chmod 777'));
 });
 
 test('定期监控单元默认只读且由环境文件显式启用恢复策略', () => {
@@ -92,11 +117,14 @@ test('定期监控单元默认只读且由环境文件显式启用恢复策略',
   assert(monitorTimer.includes('OnUnitInactiveSec=5min'));
   assert(monitorTimer.includes('Persistent=true'));
   assert(!monitorUnit.includes('/agent/index.js'));
+  assert(!monitorUnit.includes('nginx.service'));
 });
 
 test('监控脚本通过 Node 语法检查', () => {
   const result = spawnSync(process.execPath, ['--check', 'scripts/monitor-server.js'], { cwd: root, encoding: 'utf8' });
   assert.equal(result.status, 0, result.stderr);
+  const source = fs.readFileSync(path.join(root, 'scripts/monitor-server.js'), 'utf8');
+  assert(!source.includes("serviceState('nginx.service')"));
 });
 
 const passed = results.filter(Boolean).length;

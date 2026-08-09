@@ -3,7 +3,7 @@ set -euo pipefail
 
 # Safely update an existing server checkout from GitHub and reload only the
 # relay process. This script deliberately does not upload config.json, alter
-# firewall rules, install system packages, or replace Nginx configuration.
+# firewall rules, install system packages, or replace systemd configuration.
 
 SERVER_HOST="${SERVER_HOST:-}"
 SERVER_USER="${SERVER_USER:-root}"
@@ -93,10 +93,21 @@ fi
 
 PORT="$(node -e "const c=require(process.argv[1]); process.stdout.write(String(c.port || 3002))" "${REMOTE_CONFIG_PATH}")"
 BIND_HOST="$(node -e "const c=require(process.argv[1]); process.stdout.write(String(c.bindHost || '127.0.0.1'))" "${REMOTE_CONFIG_PATH}")"
-HEALTH_URL="http://${BIND_HOST}:${PORT}/health"
+USE_TLS="$(node -e "const c=require(process.argv[1]); process.stdout.write(c.useTLS === true ? '1' : '0')" "${REMOTE_CONFIG_PATH}")"
+HEALTH_HOST="${BIND_HOST}"
+[[ "${HEALTH_HOST}" == "0.0.0.0" ]] && HEALTH_HOST="127.0.0.1"
+[[ "${HEALTH_HOST}" == "::" ]] && HEALTH_HOST="[::1]"
+HEALTH_SCHEME="http"
+CURL_HEALTH=(curl --fail --silent)
+if [[ "${USE_TLS}" == "1" ]]; then
+  HEALTH_SCHEME="https"
+  # 仅对本机回环健康检查跳过域名匹配；公网证书由独立监控严格校验。
+  CURL_HEALTH+=(--insecure)
+fi
+HEALTH_URL="${HEALTH_SCHEME}://${HEALTH_HOST}:${PORT}/health"
 HEALTH_OK=0
 for attempt in {1..15}; do
-  if HEALTH_RESPONSE="$(curl --fail --silent "${HEALTH_URL}" 2>/dev/null)"; then
+  if HEALTH_RESPONSE="$("${CURL_HEALTH[@]}" "${HEALTH_URL}" 2>/dev/null)"; then
     printf '%s\n' "${HEALTH_RESPONSE}"
     HEALTH_OK=1
     break
@@ -105,7 +116,7 @@ for attempt in {1..15}; do
 done
 [[ "${HEALTH_OK}" == "1" ]] || {
   echo "ERROR: health check failed after 15 seconds: ${HEALTH_URL}" >&2
-  curl --fail --silent --show-error "${HEALTH_URL}" >&2 || true
+  "${CURL_HEALTH[@]}" --show-error "${HEALTH_URL}" >&2 || true
   exit 1
 }
 REMOTE_SCRIPT

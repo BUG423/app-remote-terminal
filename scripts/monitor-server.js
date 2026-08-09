@@ -157,11 +157,20 @@ function requestStatus(client, options, timeoutMs = 4000) {
   });
 }
 
-async function checkInternalHealth(host, port) {
-  const first = await requestStatus(http, { hostname: host, port, path: '/health', method: 'GET' });
+async function checkInternalHealth(config, host, port) {
+  const useTls = config.useTLS === true;
+  const client = useTls ? https : http;
+  const options = {
+    hostname: host,
+    port,
+    path: '/health',
+    method: 'GET',
+    ...(useTls ? { rejectUnauthorized: false } : {}),
+  };
+  const first = await requestStatus(client, options);
   if (first.ok) return first;
   await sleep(750);
-  return requestStatus(http, { hostname: host, port, path: '/health', method: 'GET' });
+  return requestStatus(client, options);
 }
 
 function checkLocalTls(host, port) {
@@ -169,7 +178,7 @@ function checkLocalTls(host, port) {
   return requestStatus(https, {
     hostname: '127.0.0.1',
     port,
-    path: '/',
+    path: '/health',
     method: 'GET',
     servername: host,
     headers: { Host: host },
@@ -195,10 +204,13 @@ function checkRemoteAgent(config, device, timeoutMs = 5000) {
   const WebSocket = require(path.join(PROJECT_ROOT, 'server', 'node_modules', 'ws'));
   const bindHost = ['0.0.0.0', '::'].includes(config.bindHost) ? '127.0.0.1' : (config.bindHost || '127.0.0.1');
   const port = Number(config.port) || 3002;
-  const target = `ws://${bindHost.includes(':') ? `[${bindHost}]` : bindHost}:${port}`;
+  const useTls = config.useTLS === true;
+  const target = `${useTls ? 'wss' : 'ws'}://${bindHost.includes(':') ? `[${bindHost}]` : bindHost}:${port}`;
 
   return new Promise((resolve) => {
-    const ws = new WebSocket(target);
+    // TLS 证书由 checkLocalTls 单独按公网域名严格校验。鉴权探针走本机回环，
+    // 因 URL 主机名是 127.0.0.1，仅在这里关闭重复的主机名校验。
+    const ws = new WebSocket(target, useTls ? { rejectUnauthorized: false } : undefined);
     let settled = false;
     const finish = (result) => {
       if (settled) return;
@@ -306,23 +318,14 @@ async function main() {
     serverState = serviceState('remote-terminal-server.service');
   }
 
-  let nginxState = serviceState('nginx.service');
-  if (nginxState !== 'active' && autoHeal) {
-    const restarted = systemctl('restart', 'nginx.service');
-    if (restarted.ok) actions.push('restarted nginx.service');
-    else errors.push(`failed to restart Nginx: ${restarted.stderr || restarted.error || restarted.status}`);
-    await sleep(1000);
-    nginxState = serviceState('nginx.service');
-  }
-
-  let internalHealth = await checkInternalHealth(bindHost, port);
+  let internalHealth = await checkInternalHealth(config, bindHost, port);
   if (!internalHealth.ok && serverState === 'active' && autoHeal) {
     const restarted = systemctl('restart', 'remote-terminal-server.service');
     if (restarted.ok) actions.push('restarted unhealthy remote-terminal-server.service');
     else errors.push(`failed to restart unhealthy Server: ${restarted.stderr || restarted.error || restarted.status}`);
     await sleep(1500);
     serverState = serviceState('remote-terminal-server.service');
-    internalHealth = await checkInternalHealth(bindHost, port);
+    internalHealth = await checkInternalHealth(config, bindHost, port);
   }
 
   const localTls = await checkLocalTls(tlsHost, tlsPort);
@@ -331,7 +334,6 @@ async function main() {
     : { ok: false, online: false, error: 'skipped because Server health check failed' };
 
   if (serverState !== 'active') errors.push(`Server service is ${serverState}`);
-  if (nginxState !== 'active') errors.push(`Nginx service is ${nginxState}`);
   if (!internalHealth.ok) errors.push(`internal health check failed: ${internalHealth.error || internalHealth.statusCode || 'unknown'}`);
   if (!localTls.ok) errors.push(`local TLS check failed: ${localTls.error || localTls.statusCode || 'unknown'}`);
   if (!remoteAgent.online) errors.push(`remote Agent ${device.id} is offline: ${remoteAgent.error || 'not connected'}`);
@@ -352,7 +354,6 @@ async function main() {
     device: { id: device.id, name: device.name || device.id },
     checks: {
       serverService: { ok: serverState === 'active', state: serverState },
-      nginxService: { ok: nginxState === 'active', state: nginxState },
       internalHealth,
       localTls: { ...localTls, host: tlsHost || null, port: tlsHost ? tlsPort : null },
       remoteAgent,

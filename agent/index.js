@@ -1,6 +1,6 @@
 /**
  * ═══════════════════════════════════════════════════════════════
- * Claude Web — 本地 Agent
+ * Remote Terminal — 本地 Agent
  *
  * 职责：
  *   - 连接云服务器（带自动重连）
@@ -681,7 +681,7 @@ const cleaned = sessionManager.cleanStaleSessions();
 
 console.log('');
 console.log('╔══════════════════════════════════════════╗');
-console.log('║         Claude Web Agent 🤖              ║');
+console.log('║       Remote Terminal Agent 🤖           ║');
 console.log(`║  Server : ${displayUrl(SERVER_URL).slice(0, 32).padEnd(32)}║`);
 console.log('║  Mode   : 交互式终端 (node-pty)           ║');
 console.log(`║  Root   : ${ROOT.slice(0, 32).padEnd(32)}║`);

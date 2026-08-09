@@ -1,8 +1,8 @@
 'use strict';
 
 const assert = require('assert');
-const { StrictWebSocketClient } = require('../server/public/strict-websocket');
-const { TerminalStreamController } = require('../server/public/terminal-stream');
+const { StrictWebSocketClient } = require('../clients/ui/strict-websocket');
+const { TerminalStreamController } = require('../clients/ui/terminal-stream');
 
 const results = [];
 
@@ -132,7 +132,7 @@ test('重连定时器不会以连接对象作为错误的函数 receiver', () =>
   assert(scheduled);
 });
 
-test('xterm 同一时间只接收一个 write，后续输出按序排队', () => {
+test('xterm 同一时间只接收一个 write，并合并高频连续输出', () => {
   const terminal = new ControlledTerminal();
   const stream = new TerminalStreamController(terminal);
   stream.applySnapshot({ data: 'SNAP', seq: 5, cols: 80, rows: 24 });
@@ -143,10 +143,24 @@ test('xterm 同一时间只接收一个 write，后续输出按序排队', () =>
   assert.deepEqual(terminal.resizes, [[80, 24]]);
 
   terminal.complete(0);
-  assert.deepEqual(terminal.writes.map((item) => item.data), ['SNAP', 'SIX']);
+  assert.deepEqual(terminal.writes.map((item) => item.data), ['SNAP', 'SIXSEVEN']);
   terminal.complete(1);
-  assert.deepEqual(terminal.writes.map((item) => item.data), ['SNAP', 'SIX', 'SEVEN']);
-  terminal.complete(2);
+  assert.equal(stream.pendingBytes, 0);
+});
+
+test('一万条突发输出保持顺序且只形成一个待渲染批次', () => {
+  const terminal = new ControlledTerminal();
+  const stream = new TerminalStreamController(terminal, { maxPendingBytes: 1024 * 1024 });
+  stream.applySnapshot({ data: '', seq: 0, cols: 80, rows: 24 });
+  for (let sequence = 1; sequence <= 10000; sequence++) {
+    assert(stream.acceptOutput(`${sequence},`, sequence));
+  }
+  assert.equal(stream.queue.length, 1);
+  terminal.complete(0);
+  assert.equal(terminal.writes.length, 2);
+  assert(terminal.writes[1].data.startsWith('1,2,3,'));
+  assert(terminal.writes[1].data.endsWith('9999,10000,'));
+  terminal.complete(1);
 });
 
 test('序号断档会停止增量渲染并只请求一次完整同步', () => {

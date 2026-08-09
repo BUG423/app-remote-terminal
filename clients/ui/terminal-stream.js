@@ -91,7 +91,9 @@
         return false;
       }
       this.lastSequence = sequence;
-      this.queue.push({ kind: 'output', data, revision: this.revision });
+      const tail = this.queue[this.queue.length - 1];
+      if (tail && tail.kind === 'output' && tail.revision === this.revision) tail.data += data;
+      else this.queue.push({ kind: 'output', data, revision: this.revision });
       this.pendingBytes += bytes;
       this._drain();
       return true;
@@ -101,7 +103,9 @@
       if (this.disposed || typeof data !== 'string') return;
       const bytes = utf8Bytes(data);
       if (this.pendingBytes + bytes > this.maxPendingBytes) return;
-      this.queue.push({ kind: 'local', data, revision: this.revision });
+      const tail = this.queue[this.queue.length - 1];
+      if (tail && tail.kind === 'local' && tail.revision === this.revision) tail.data += data;
+      else this.queue.push({ kind: 'local', data, revision: this.revision });
       this.pendingBytes += bytes;
       this._drain();
     }

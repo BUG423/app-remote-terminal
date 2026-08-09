@@ -170,7 +170,7 @@ function noMatchingMessage(ws, predicate, waitMs = 150) {
     }));
   check('下架响应保留安全头且隐藏 Express 标识',
     retiredResponses.every((response) =>
-      response.headers['content-security-policy']?.includes("default-src 'self'") &&
+      response.headers['content-security-policy']?.includes("default-src 'none'") &&
       !response.headers['x-powered-by']));
 
   const invalidRole = await connect('__bad_role__');

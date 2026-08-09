@@ -2,9 +2,9 @@
   "_comment": "=== Remote Terminal 配置文件 ===",
   "_instructions": "复制为 config.json；替换所有 change-me/example.com 示例值，不要提交 config.json",
 
-  "port": 3002,
-  "bindHost": "127.0.0.1",
-  "_server_listen_comment": "Server 只监听本机 3002，由 Nginx 在 443 提供 HTTPS/WSS",
+  "port": 443,
+  "bindHost": "0.0.0.0",
+  "_server_listen_comment": "生产 Relay 直接监听 443；systemd 仅授予绑定低端口所需的 CAP_NET_BIND_SERVICE",
 
   "devices": {
     "server-a": {
@@ -47,13 +47,14 @@
   "claudeDangerouslySkipPermissions": false,
   "_legacy_chat_comment": "旧 claude -p 聊天协议默认关闭；即使启用也默认保留 Claude 权限确认",
 
-  "useTLS": false,
-  "tlsCertPath": "/etc/letsencrypt/live/terminal.example.com/fullchain.pem",
-  "tlsKeyPath": "/etc/letsencrypt/live/terminal.example.com/privkey.pem",
+  "useTLS": true,
+  "tlsCertPath": "/etc/remote-terminal/tls/fullchain.pem",
+  "tlsKeyPath": "/etc/remote-terminal/tls/privkey.pem",
+  "enableHttpRedirect": false,
   "redirectPort": 80,
-  "_direct_tls_comment": "仅 Node.js 直连 TLS 时使用。推荐由 Nginx 处理 TLS，因此保持 false",
+  "_direct_tls_comment": "Relay 原生提供 HTTPS/WSS；默认不监听 80，为 Certbot standalone 自动续期保留端口",
 
   "serverHost": "",
-  "serverPort": 3002,
+  "serverPort": 443,
   "_legacy_connection_comment": "serverHost/serverPort 仅兼容旧 Agent 配置；设置 serverUrl 后忽略"
 }

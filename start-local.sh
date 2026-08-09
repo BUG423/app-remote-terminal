@@ -1,7 +1,6 @@
 #!/bin/bash
 # ═══════════════════════════════════════════════════════════════════
-# Claude Web — 本地 Agent 启动脚本
-# 在你的本地机器（运行 Claude Code 的机器）上执行此脚本
+# Remote Terminal — 本地 Agent 启动脚本
 # ═══════════════════════════════════════════════════════════════════
 
 set -e
@@ -9,7 +8,7 @@ set -e
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 cd "$SCRIPT_DIR"
 
-echo "🖥  Claude Web — 启动本地 Agent"
+echo "🖥  Remote Terminal — 启动本地 Agent"
 echo ""
 
 # ── 1. 检查 Node.js ─────────────────────────────────────────────
@@ -48,7 +47,7 @@ cd agent && npm ci --no-audit --no-fund
 # ── 5. 启动 Agent ───────────────────────────────────────────────
 echo ""
 echo "🚀 启动 Agent，连接服务器..."
-echo "   服务器: $(grep serverHost ../config.json | cut -d'"' -f4)"
+echo "   将连接 config.json 中配置的 WSS Relay"
 echo ""
 
 # 使用 PM2（如果已安装）或直接运行
@@ -62,7 +61,7 @@ if command -v pm2 &> /dev/null; then
     echo "✅ Agent 已启动（PM2 守护）"
     echo ""
     echo "查看状态: pm2 status"
-    echo "查看日志: pm2 logs claude-web-agent"
+    echo "查看日志: pm2 logs remote-terminal-agent"
 else
     echo "直接运行（前台模式）..."
     echo "提示: 安装 PM2 可以后台运行: npm install -g pm2"

@@ -1,7 +1,7 @@
 {
-  "name": "claude-web-agent",
+  "name": "remote-terminal-agent",
   "version": "1.0.0",
-  "description": "Local agent for Claude Web — bridges cloud server to local Claude Code",
+  "description": "Local PTY agent for Remote Terminal",
   "main": "index.js",
   "scripts": {
     "start": "node index.js",
