@@ -10,11 +10,10 @@
   const DEFAULTS = Object.freeze({
     version: 1,
     fontSize: 14,
-    scrollback: 5000,
+    scrollback: 10000,
     cursorBlink: true,
     showMobileKeybar: true,
     confirmLargePaste: true,
-    rememberToken: false,
     pinnedSessionIds: [],
   });
 
@@ -27,7 +26,7 @@
   function sanitize(input) {
     const value = input && typeof input === 'object' ? input : {};
     const pinned = Array.isArray(value.pinnedSessionIds)
-      ? [...new Set(value.pinnedSessionIds.filter((id) => typeof id === 'string' && id.length <= 128))].slice(0, 100)
+      ? [...new Set(value.pinnedSessionIds.filter((id) => typeof id === 'string' && id.length <= 300))].slice(0, 100)
       : [];
     return {
       version: 1,
@@ -36,7 +35,6 @@
       cursorBlink: value.cursorBlink !== false,
       showMobileKeybar: value.showMobileKeybar !== false,
       confirmLargePaste: value.confirmLargePaste !== false,
-      rememberToken: value.rememberToken === true,
       pinnedSessionIds: pinned,
     };
   }

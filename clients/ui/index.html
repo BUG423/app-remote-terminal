@@ -5,37 +5,13 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <meta name="theme-color" content="#f5f6f8">
   <meta http-equiv="Content-Security-Policy" content="default-src 'self' file:; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src ws: wss:; object-src 'none'; frame-src 'none'; base-uri 'none'">
-  <meta name="mobile-web-app-capable" content="yes">
-  <meta name="apple-mobile-web-app-capable" content="yes">
-  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
   <title>Remote Terminal</title>
-  <link rel="manifest" href="./manifest.webmanifest">
   <link rel="stylesheet" href="./vendor/xterm.css">
-  <link rel="stylesheet" href="./style.css?v=20260806c">
+  <link rel="stylesheet" href="./style.css?v=20260809b">
 </head>
 <body>
-  <!-- ── 登录 ──────────────────────────────────────────────── -->
-  <div id="login-screen" class="screen">
-    <div class="login-card">
-      <div class="login-icon" aria-hidden="true"><span>&gt;_</span></div>
-      <h1>Remote Terminal</h1>
-      <p class="login-subtitle">随时连接你的远程终端</p>
-      <form id="login-form">
-        <div id="relay-url-field" class="hidden">
-          <label for="relay-url-input">阿里云中转地址</label>
-          <input type="url" id="relay-url-input" placeholder="wss://terminal.example.cn" autocomplete="url" inputmode="url">
-        </div>
-        <label for="token-input">访问 Token</label>
-        <input type="password" id="token-input" placeholder="输入访问 Token..." autocomplete="current-password">
-        <label id="remember-token-row" class="login-check hidden"><input id="remember-token" type="checkbox"> <span>在本机安全保存 Token</span></label>
-        <button type="submit" id="login-btn">连接并进入</button>
-      </form>
-      <p id="login-error" class="error-msg hidden"></p>
-    </div>
-  </div>
-
   <!-- ── 主界面 ────────────────────────────────────────────── -->
-  <div id="main-screen" class="screen hidden" data-mobile-view="sessions">
+  <div id="main-screen" class="screen" data-mobile-view="sessions" data-desktop-view="terminal">
     <!-- 侧栏：会话列表 -->
     <aside id="sidebar">
       <div class="sidebar-header">
@@ -47,6 +23,9 @@
           </div>
         </div>
         <div class="sidebar-actions">
+          <button id="desktop-devices-btn" class="desktop-only icon-button" title="设备管理" aria-label="设备管理">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="4" y="5" width="16" height="11" rx="2"/><path d="M9 20h6m-3-4v4"/></svg>
+          </button>
           <button id="settings-btn" class="desktop-only icon-button" title="客户端设置" aria-label="客户端设置">
             <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 8.5A3.5 3.5 0 1 0 12 15a3.5 3.5 0 0 0 0-7Zm8.3 4.9-1.7 1 .1 2-2.7 1.6-1.8-.9-1.7 1.1-.1 2H9.3l-.1-2-1.7-1.1-1.8.9L3 16.4l.1-2-1.7-1v-2.8l1.7-1-.1-2L5.7 6l1.8.9 1.7-1.1.1-2h3.1l.1 2 1.7 1.1L16 6l2.7 1.6-.1 2 1.7 1v2.8Z"/></svg>
           </button>
@@ -87,6 +66,7 @@
         <div class="th-right">
           <button id="tile-view-btn" title="分屏显示多个终端" disabled>📐 分屏</button>
           <span id="active-status" class="badge"></span>
+          <button id="rename-session-btn" class="desktop-only" title="为当前客户端设置会话名称" disabled>重命名</button>
           <button id="delete-session-btn" class="danger" title="删除当前会话" disabled>删除</button>
           <button id="mobile-session-more" class="mobile-only header-icon-button" title="会话操作" aria-label="会话操作">
             <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="5" cy="12" r="1.6"/><circle cx="12" cy="12" r="1.6"/><circle cx="19" cy="12" r="1.6"/></svg>
@@ -99,6 +79,7 @@
           <p>新建一个会话，开始操作远程终端</p>
         </div>
       </div>
+      <button id="history-bottom-btn" class="history-bottom hidden" type="button">回到底部 ↓</button>
       <nav id="mobile-keybar" class="mobile-only" aria-label="终端快捷键">
         <button data-key="CTRL">Ctrl</button><button data-key="ALT">Alt</button>
         <button data-key="ESC">Esc</button><button data-key="TAB">Tab</button>
@@ -116,25 +97,28 @@
       </form>
     </main>
 
-    <section id="mobile-device-page" class="mobile-surface mobile-only" aria-labelledby="mobile-device-page-title">
-      <header class="mobile-page-header"><h1 id="mobile-device-page-title">设备</h1></header>
-      <div class="mobile-page-scroll">
-        <article class="device-card">
-          <div class="device-avatar"><span>&gt;_</span><i id="mobile-device-status-dot" class="offline"></i></div>
-          <div class="device-card-copy">
-            <h2 id="mobile-device-name">本地 Agent</h2>
-            <p id="mobile-device-state">当前离线</p>
-          </div>
-        </article>
-        <div class="mobile-group-title">连接信息</div>
-        <div class="mobile-list-group">
-          <div class="mobile-info-row"><span>连接状态</span><strong id="mobile-connection-state">未连接</strong></div>
-          <div class="mobile-info-row stacked"><span>阿里云中转</span><small id="mobile-relay-address">未配置</small></div>
-          <div class="mobile-info-row"><span>活动会话</span><strong id="mobile-running-count">0</strong></div>
+    <section id="device-page" class="device-page mobile-surface" aria-labelledby="device-page-title">
+      <header class="device-page-header mobile-page-header">
+        <div><h1 id="device-page-title">设备</h1><p class="desktop-only">集中管理并快速切换你的远程终端</p></div>
+        <div class="device-header-actions">
+          <button id="desktop-device-back" class="ghost desktop-only" type="button">返回终端</button>
+          <button id="add-device-btn" class="primary device-add-button" type="button">＋ 添加设备</button>
         </div>
-        <div class="mobile-list-group mobile-actions-group">
-          <button id="mobile-reconnect-btn" class="mobile-list-button" type="button"><span>立即重新连接</span><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 11a8 8 0 1 0-2.3 6M20 5v6h-6"/></svg></button>
-          <button id="mobile-connection-settings-btn" class="mobile-list-button" type="button"><span>连接与安全设置</span><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m9 6 6 6-6 6"/></svg></button>
+      </header>
+      <div class="device-page-content mobile-page-scroll">
+        <div class="device-toolbar">
+          <label class="device-search">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m20 20-4.5-4.5m2.5-5A7.5 7.5 0 1 1 3 10.5a7.5 7.5 0 0 1 15 0Z"/></svg>
+            <input id="device-search-input" type="search" placeholder="搜索设备名称或地址" autocomplete="off" aria-label="搜索设备">
+          </label>
+          <span id="device-count-label">0 台设备</span>
+        </div>
+        <div id="device-list" class="device-grid"></div>
+        <div id="device-empty" class="device-empty hidden">
+          <div class="device-empty-icon">＋</div>
+          <h2>添加第一台设备</h2>
+          <p>进入软件无需先登录。请在这里保存中转域名和 Token，随后即可在“终端”页查看该设备的会话。</p>
+          <button id="device-empty-add" class="primary" type="button">添加设备</button>
         </div>
       </div>
     </section>
@@ -148,10 +132,10 @@
         </article>
         <div class="mobile-list-group profile-actions">
           <button id="mobile-open-settings" class="mobile-list-button" type="button"><span class="row-icon settings-icon">Aa</span><span>显示与终端设置</span><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m9 6 6 6-6 6"/></svg></button>
-          <button id="mobile-open-connection" class="mobile-list-button" type="button"><span class="row-icon security-icon">✓</span><span>连接与凭据</span><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m9 6 6 6-6 6"/></svg></button>
-          <div class="mobile-info-row"><span>客户端版本</span><small>0.2.2</small></div>
+          <button id="mobile-open-connection" class="mobile-list-button" type="button"><span class="row-icon security-icon">✓</span><span>设备与凭据</span><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m9 6 6 6-6 6"/></svg></button>
+          <div class="mobile-info-row"><span>客户端版本</span><small id="mobile-client-version">0.3.0</small></div>
         </div>
-        <button id="mobile-logout-btn" class="mobile-logout-button" type="button">退出登录</button>
+        <button id="mobile-logout-btn" class="mobile-logout-button" type="button">断开当前设备</button>
       </div>
     </section>
 
@@ -183,15 +167,14 @@
   <div id="settings-modal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="settings-title">
     <div class="modal-card settings-card">
       <div class="modal-heading"><h3 id="settings-title">客户端设置</h3><button id="settings-close" class="modal-close" type="button" aria-label="关闭">×</button></div>
-      <label id="setting-relay-row" class="setting-row setting-stacked hidden"><span>阿里云中转地址</span><input id="setting-relay-url" type="url" inputmode="url" autocomplete="url" placeholder="wss://terminal.example.cn"></label>
       <label class="setting-row"><span>终端字号</span><input id="setting-font-size" type="number" min="11" max="24" step="1"></label>
       <label class="setting-row"><span>回滚行数</span><input id="setting-scrollback" type="number" min="1000" max="20000" step="500"></label>
       <label class="setting-row checkbox-row"><span>光标闪烁</span><input id="setting-cursor-blink" type="checkbox"></label>
       <label class="setting-row checkbox-row"><span>显示手机快捷键栏</span><input id="setting-mobile-keybar" type="checkbox"></label>
       <label class="setting-row checkbox-row"><span>大段粘贴前确认</span><input id="setting-paste-confirm" type="checkbox"></label>
-      <p id="settings-security-hint" class="settings-hint">中转地址保存在本机；访问 Token 默认只保存在当前运行会话。</p>
+      <p id="settings-security-hint" class="settings-hint">显示设置保存在本机；设备 Token 由系统安全凭据存储独立保护。</p>
       <div class="modal-actions spread">
-        <div><button id="settings-logout" class="ghost danger-text">退出登录</button><button id="settings-reset" class="ghost">恢复默认</button></div>
+        <div><button id="settings-logout" class="ghost danger-text">断开设备</button><button id="settings-reset" class="ghost">恢复默认</button></div>
         <div><button id="settings-cancel" class="ghost">取消</button><button id="settings-save" class="primary">保存</button></div>
       </div>
     </div>
@@ -201,11 +184,41 @@
     <div class="modal-card action-sheet">
       <div class="action-sheet-handle mobile-only"></div>
       <h3 id="session-actions-title">会话操作</h3>
+      <button id="action-rename-session" type="button">重命名会话</button>
       <button id="action-pin-session" type="button">置顶会话</button>
       <button id="action-new-session" type="button">新建会话</button>
       <button id="action-delete-session" class="danger-text" type="button">删除当前会话</button>
       <button id="action-sheet-cancel" class="action-sheet-cancel" type="button">取消</button>
     </div>
+  </div>
+
+  <div id="device-modal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="device-modal-title">
+    <form id="device-form" class="modal-card device-form" autocomplete="off">
+      <div class="modal-heading"><h3 id="device-modal-title">添加设备</h3><button id="device-modal-close" class="modal-close" type="button" aria-label="关闭">×</button></div>
+      <input id="device-edit-id" type="hidden">
+      <label class="form-field"><span>设备名称</span><input id="device-name-input" type="text" maxlength="80" placeholder="例如：生产服务器" autocomplete="off" required></label>
+      <label class="form-field"><span>中转域名或地址</span><input id="device-relay-input" type="text" maxlength="2048" inputmode="url" placeholder="webclaude.xmu-zss.cn" autocomplete="url" required><small>默认使用安全的 WSS；也可填写完整的 wss:// 地址。</small></label>
+      <label class="form-field"><span>访问 Token</span><input id="device-token-input" type="password" maxlength="4096" placeholder="输入该设备的浏览器 Token" autocomplete="new-password"><small id="device-token-hint">Token 仅写入系统安全凭据存储，不进入普通配置。</small></label>
+      <p id="device-form-error" class="error-msg hidden"></p>
+      <div class="modal-actions"><button id="device-modal-cancel" class="ghost" type="button">取消</button><button id="device-save-btn" class="primary" type="submit">保存并连接</button></div>
+    </form>
+  </div>
+
+  <div id="device-delete-modal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="device-delete-title">
+    <div class="modal-card">
+      <h3 id="device-delete-title">删除设备</h3>
+      <p id="device-delete-text">删除后，本机保存的设备信息、Token 和会话别名都会清除，不会删除远端会话。</p>
+      <div class="modal-actions"><button id="device-delete-cancel" class="ghost" type="button">取消</button><button id="device-delete-confirm" class="danger" type="button">删除</button></div>
+    </div>
+  </div>
+
+  <div id="session-rename-modal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="session-rename-title">
+    <form id="session-rename-form" class="modal-card" autocomplete="off">
+      <h3 id="session-rename-title">重命名会话</h3>
+      <p>名称只保存在当前客户端，不受后台会话标识影响；留空可恢复后台原始名称。</p>
+      <label class="form-field"><span>会话名称</span><input id="session-rename-input" type="text" maxlength="120" placeholder="例如：部署生产环境"></label>
+      <div class="modal-actions"><button id="session-rename-cancel" class="ghost" type="button">取消</button><button class="primary" type="submit">保存</button></div>
+    </form>
   </div>
 
   <div id="paste-modal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="paste-title">
@@ -225,9 +238,10 @@
   <script src="./vendor/xterm.js"></script>
   <script src="./vendor/addon-fit.js"></script>
   <script src="./vendor/addon-unicode11.js"></script>
-  <script src="./strict-websocket.js?v=20260804a"></script>
+  <script src="./strict-websocket.js?v=20260809b"></script>
   <script src="./terminal-stream.js?v=20260804a"></script>
-  <script src="./client-settings.js?v=20260806a"></script>
-  <script src="./app.js?v=20260806c"></script>
+  <script src="./client-settings.js?v=20260809b"></script>
+  <script src="./device-store.js?v=20260809a"></script>
+  <script src="./app.js?v=20260809b"></script>
 </body>
 </html>

@@ -32,10 +32,10 @@
   "maxBrowsersPerToken": 8,
   "maxTotalConnections": 200,
   "maxWsBufferedBytes": 2097152,
-  "scrollbackBytes": 262144,
-  "scrollbackRows": 5000,
+  "scrollbackBytes": 524288,
+  "scrollbackRows": 10000,
   "maxSyncPendingBytes": 524288,
-  "offlineOutputBytes": 262144,
+  "offlineOutputBytes": 524288,
   "_limits_comment": "限制 PTY/浏览器数量、完整终端状态历史，以及同步期间的增量输出缓存",
 
   "auditEnabled": true,

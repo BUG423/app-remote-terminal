@@ -7,6 +7,8 @@ Android 和桌面客户端共用阿里云中转协议。终端 UI 会在构建�
 ## 发布顺序
 
 1. 执行 `npm ci --prefix clients` 安装锁定的共用 UI 依赖
-2. 在登录页配置真实中转域名并验证 Android/桌面 WSS
+2. 启动客户端，在“设备”页添加真实中转域名和浏览器 Token，验证多设备切换与 WSS
 3. 打包 Android APK 和 Windows/macOS/Linux 安装包
 4. 发布前完成签名、版本号和回归测试
+
+客户端不会显示强制登录页。设备名称、地址、当前选择和本地会话别名按设备保存；Token 不写入 `localStorage`，Android 使用 Keystore，桌面端使用操作系统安全存储。若桌面环境只能提供明文后端，Token 将只保留到本次退出。

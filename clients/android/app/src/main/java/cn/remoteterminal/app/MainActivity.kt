@@ -11,6 +11,7 @@ import android.security.keystore.KeyGenParameterSpec
 import android.security.keystore.KeyProperties
 import android.util.Base64
 import android.webkit.CookieManager
+import android.webkit.RenderProcessGoneDetail
 import android.webkit.WebSettings
 import android.webkit.WebView
 import android.webkit.WebViewClient
@@ -50,31 +51,53 @@ private class SecureTokenStore(private val context: Context) {
         }
     }
 
-    fun write(token: String) {
-        if (token.length > 4096) return
+    private fun validCredentialId(value: String): Boolean =
+        value.matches(Regex("^[A-Za-z0-9._:-]{1,128}$"))
+
+    private fun writeValues(ciphertextKey: String, ivKey: String, token: String): Boolean {
+        if (token.length > 4096) return false
         val cipher = Cipher.getInstance("AES/GCM/NoPadding").apply { init(Cipher.ENCRYPT_MODE, key()) }
-        preferences.edit()
-            .putString("ciphertext", Base64.encodeToString(cipher.doFinal(token.toByteArray(Charsets.UTF_8)), Base64.NO_WRAP))
-            .putString("iv", Base64.encodeToString(cipher.iv, Base64.NO_WRAP))
-            .apply()
+        return preferences.edit()
+            .putString(ciphertextKey, Base64.encodeToString(cipher.doFinal(token.toByteArray(Charsets.UTF_8)), Base64.NO_WRAP))
+            .putString(ivKey, Base64.encodeToString(cipher.iv, Base64.NO_WRAP))
+            .commit()
     }
 
-    fun read(): String {
+    private fun readValues(ciphertextKey: String, ivKey: String): String {
         return try {
-            val ciphertext = preferences.getString("ciphertext", null) ?: return ""
-            val iv = preferences.getString("iv", null) ?: return ""
+            val ciphertext = preferences.getString(ciphertextKey, null) ?: return ""
+            val iv = preferences.getString(ivKey, null) ?: return ""
             val cipher = Cipher.getInstance("AES/GCM/NoPadding").apply {
                 init(Cipher.DECRYPT_MODE, key(), GCMParameterSpec(128, Base64.decode(iv, Base64.NO_WRAP)))
             }
             String(cipher.doFinal(Base64.decode(ciphertext, Base64.NO_WRAP)), Charsets.UTF_8)
         } catch (_: Exception) {
-            clear()
+            preferences.edit().remove(ciphertextKey).remove(ivKey).apply()
             ""
         }
     }
 
-    fun clear() {
-        preferences.edit().clear().apply()
+    fun read(): String = readValues("ciphertext", "iv")
+
+    fun writeDevice(deviceId: String, token: String): Boolean {
+        if (!validCredentialId(deviceId)) return false
+        if (!writeValues("ciphertext:$deviceId", "iv:$deviceId", token)) return false
+        return preferences.edit().remove("ciphertext").remove("iv").commit()
+    }
+
+    fun readDevice(deviceId: String): String {
+        if (!validCredentialId(deviceId)) return ""
+        return readValues("ciphertext:$deviceId", "iv:$deviceId")
+    }
+
+    fun clearDevice(deviceId: String): Boolean {
+        if (!validCredentialId(deviceId)) return false
+        return preferences.edit()
+            .remove("ciphertext:$deviceId")
+            .remove("iv:$deviceId")
+            .remove("ciphertext")
+            .remove("iv")
+            .commit()
     }
 }
 
@@ -99,10 +122,19 @@ private class NativeBridge(
     fun readCredential(): String = secureTokenStore.read()
 
     @JavascriptInterface
-    fun writeCredential(token: String) = secureTokenStore.write(token)
+    fun readDeviceCredential(deviceId: String): String = secureTokenStore.readDevice(deviceId)
 
     @JavascriptInterface
-    fun clearCredential() = secureTokenStore.clear()
+    fun writeDeviceCredential(deviceId: String, token: String): Boolean = secureTokenStore.writeDevice(deviceId, token)
+
+    @JavascriptInterface
+    fun clearDeviceCredential(deviceId: String): Boolean = secureTokenStore.clearDevice(deviceId)
+
+    @JavascriptInterface
+    fun getClientVersion(): String = BuildConfig.VERSION_NAME
+
+    @JavascriptInterface
+    fun getDefaultRelayUrl(): String = BuildConfig.DEFAULT_RELAY_URL
 
     @JavascriptInterface
     @Suppress("DEPRECATION")
@@ -155,11 +187,21 @@ class MainActivity : Activity() {
             settings.allowContentAccess = false
             settings.mixedContentMode = WebSettings.MIXED_CONTENT_NEVER_ALLOW
             settings.javaScriptCanOpenWindowsAutomatically = false
+            CookieManager.getInstance().setAcceptCookie(false)
             CookieManager.getInstance().setAcceptThirdPartyCookies(this, false)
             addJavascriptInterface(NativeBridge(this@MainActivity, rootView, this), "RemoteTerminalNative")
             webViewClient = object : WebViewClient() {
                 override fun shouldOverrideUrlLoading(view: WebView, request: WebResourceRequest): Boolean {
-                    return request.url.scheme != "file"
+                    return !request.url.toString().startsWith("file:///android_asset/www/")
+                }
+
+                override fun onRenderProcessGone(view: WebView, detail: RenderProcessGoneDetail): Boolean {
+                    view.post {
+                        if (!this@MainActivity.isFinishing && !this@MainActivity.isDestroyed) {
+                            this@MainActivity.recreate()
+                        }
+                    }
+                    return true
                 }
             }
             if (savedInstanceState == null || restoreState(savedInstanceState) == null) {
@@ -232,6 +274,12 @@ class MainActivity : Activity() {
     override fun onResume() {
         super.onResume()
         webView.onResume()
+        webView.post {
+            webView.evaluateJavascript(
+                "window.RemoteTerminalApp && window.RemoteTerminalApp.onResume()",
+                null,
+            )
+        }
     }
 
     override fun onSaveInstanceState(outState: Bundle) {

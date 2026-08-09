@@ -16,6 +16,7 @@
       this.socket = null;
       this.generation = 0;
       this.reconnectTimer = null;
+      this.handshakeTimer = null;
       this.reconnectAttempts = 0;
       this.reconnectEnabled = true;
       this.authenticated = false;
@@ -27,6 +28,9 @@
       this.setTimer = (callback, delay) => scheduleTimer(callback, delay);
       this.clearTimer = (timer) => cancelTimer(timer);
       this.random = options.random || Math.random;
+      this.handshakeTimeoutMs = Number.isFinite(Number(options.handshakeTimeoutMs))
+        ? Math.max(0, Number(options.handshakeTimeoutMs))
+        : 0;
     }
 
     _isCurrent(socket, generation) {
@@ -44,6 +48,32 @@
         this.clearTimer(this.reconnectTimer);
         this.reconnectTimer = null;
       }
+    }
+
+    _cancelHandshake() {
+      if (this.handshakeTimer !== null) {
+        this.clearTimer(this.handshakeTimer);
+        this.handshakeTimer = null;
+      }
+    }
+
+    _disconnectCurrent(socket, generation, event, closeSocket = false) {
+      if (!this._isCurrent(socket, generation)) return false;
+      this._cancelHandshake();
+      this.generation++;
+      this.socket = null;
+      this.authenticated = false;
+      if (closeSocket) {
+        try { socket.close(event?.code || 1000, event?.reason || 'Client reconnect'); } catch { /* ignore */ }
+      }
+      try {
+        if (this.options.onSocket) this.options.onSocket(null);
+        if (this.options.onDisconnect) this.options.onDisconnect(event || { code: 1006 });
+      } catch (err) {
+        this._reportError(err);
+      }
+      this._scheduleReconnect();
+      return true;
     }
 
     connect() {
@@ -69,6 +99,17 @@
       this.socket = socket;
       this.authenticated = false;
       if (this.options.onSocket) this.options.onSocket(socket);
+      if (this.handshakeTimeoutMs > 0) {
+        this.handshakeTimer = this.setTimer(() => {
+          this.handshakeTimer = null;
+          if (!this._isCurrent(socket, generation) || this.authenticated) return;
+          this._reportError(new Error('WebSocket authentication timeout'));
+          this._disconnectCurrent(socket, generation, {
+            code: 4008,
+            reason: 'Authentication timeout',
+          }, true);
+        }, this.handshakeTimeoutMs);
+      }
 
       socket.onopen = () => {
         if (!this._isCurrent(socket, generation)) return;
@@ -91,16 +132,7 @@
         this.options.onMessage(data);
       };
       socket.onclose = (event) => {
-        if (!this._isCurrent(socket, generation)) return;
-        this.socket = null;
-        this.authenticated = false;
-        try {
-          if (this.options.onSocket) this.options.onSocket(null);
-          if (this.options.onDisconnect) this.options.onDisconnect(event);
-        } catch (err) {
-          this._reportError(err);
-        }
-        this._scheduleReconnect();
+        this._disconnectCurrent(socket, generation, event);
       };
       socket.onerror = (event) => {
         if (!this._isCurrent(socket, generation)) return;
@@ -115,6 +147,7 @@
       this.reconnectEnabled = true;
       this.reconnectAttempts = 0;
       this._cancelReconnect();
+      this._cancelHandshake();
     }
 
     send(data) {
@@ -142,9 +175,30 @@
       this.reconnectAttempts = 0;
     }
 
+    disconnect(code = 1000, reason = 'Client disconnected') {
+      this._cancelReconnect();
+      this._cancelHandshake();
+      const socket = this.socket;
+      this.generation++;
+      this.socket = null;
+      this.authenticated = false;
+      if (this.options.onSocket) this.options.onSocket(null);
+      if (socket && socket.readyState !== 3) {
+        try { socket.close(code, reason); } catch { /* ignore */ }
+      }
+    }
+
+    reconnectNow() {
+      if (!this.reconnectEnabled || !this.options.getToken()) return false;
+      this.disconnect(1000, 'Immediate reconnect');
+      this.reconnectAttempts = 0;
+      return this.connect();
+    }
+
     disableReconnect() {
       this.reconnectEnabled = false;
       this._cancelReconnect();
+      this._cancelHandshake();
     }
 
     enableReconnect() {

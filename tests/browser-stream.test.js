@@ -132,6 +132,55 @@ test('重连定时器不会以连接对象作为错误的函数 receiver', () =>
   assert(scheduled);
 });
 
+test('认证超时会关闭僵尸连接并安排重连', () => {
+  const socket = new FakeSocket();
+  const callbacks = [];
+  const errors = [];
+  let disconnects = 0;
+  const client = new StrictWebSocketClient({
+    createSocket: () => socket,
+    getUrl: () => 'ws://test',
+    getToken: () => 'token',
+    onMessage: () => {},
+    onError: (error) => errors.push(error),
+    onDisconnect: () => { disconnects++; },
+    setTimer: (fn) => { callbacks.push(fn); return callbacks.length; },
+    clearTimer: () => {},
+    random: () => 0.5,
+    handshakeTimeoutMs: 15000,
+  });
+  assert(client.connect());
+  assert.equal(callbacks.length, 1);
+  callbacks[0]();
+  assert.equal(socket.readyState, 2);
+  assert.equal(client.socket, null);
+  assert.equal(client.authenticated, false);
+  assert.equal(disconnects, 1);
+  assert.equal(errors[0].message, 'WebSocket authentication timeout');
+  assert.equal(callbacks.length, 2);
+});
+
+test('主动断开会使旧连接事件失效且不会偷偷重连', () => {
+  const socket = new FakeSocket();
+  const callbacks = [];
+  let disconnects = 0;
+  const client = new StrictWebSocketClient({
+    createSocket: () => socket,
+    getUrl: () => 'ws://test',
+    getToken: () => 'token',
+    onMessage: () => {},
+    onDisconnect: () => { disconnects++; },
+    setTimer: (fn) => { callbacks.push(fn); return callbacks.length; },
+    clearTimer: () => {},
+  });
+  client.connect();
+  client.disconnect(1000, 'test');
+  socket.closeEvent();
+  assert.equal(client.socket, null);
+  assert.equal(disconnects, 0);
+  assert.equal(callbacks.length, 0);
+});
+
 test('xterm 同一时间只接收一个 write，并合并高频连续输出', () => {
   const terminal = new ControlledTerminal();
   const stream = new TerminalStreamController(terminal);

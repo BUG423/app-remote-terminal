@@ -20,7 +20,8 @@ android {
     compileSdk = 35
     buildFeatures { buildConfig = true }
     defaultConfig {
-        applicationId = "cn.remoteterminal.app"; minSdk = 26; targetSdk = 35; versionCode = 4; versionName = "0.2.2"
+        applicationId = "cn.remoteterminal.app"; minSdk = 26; targetSdk = 35; versionCode = 5; versionName = "0.3.0"
+        buildConfigField("String", "DEFAULT_RELAY_URL", "\"wss://webclaude.xmu-zss.cn\"")
     }
     buildTypes {
         debug { applicationIdSuffix = ".debug"; versionNameSuffix = "-debug" }

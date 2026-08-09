@@ -1,9 +1,0 @@
-{
-  "name": "Remote Terminal",
-  "short_name": "Terminal",
-  "start_url": "./",
-  "display": "standalone",
-  "background_color": "#f5f6f8",
-  "theme_color": "#f5f6f8",
-  "description": "通过阿里云中转安全访问远程终端"
-}

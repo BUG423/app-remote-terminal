@@ -43,11 +43,6 @@ function cancelAgentOfflineTimers() {
 
 // ── DOM ────────────────────────────────────────────────────────
 const $ = (id) => document.getElementById(id);
-const loginScreen = $('login-screen');
-const loginForm = $('login-form');
-const tokenInput = $('token-input');
-const loginBtn = $('login-btn');
-const loginError = $('login-error');
 const sessionListEl = $('session-list');
 const newSessionBtn = $('new-session-btn');
 const agentStatus = $('agent-status');
@@ -57,6 +52,7 @@ const emptyHint = $('empty-hint');
 const activeTitle = $('active-title');
 const activeCwd = $('active-cwd');
 const activeStatus = $('active-status');
+const renameSessionBtn = $('rename-session-btn');
 const deleteBtn = $('delete-session-btn');
 const deleteModal = $('delete-modal');
 const deleteModalText = $('delete-modal-text');
@@ -70,33 +66,46 @@ const mobileCommandSend = $('mobile-command-send');
 const mobileDirectInput = $('mobile-direct-input');
 const mobileTabbar = $('mobile-tabbar');
 const mobileAgentBanner = $('mobile-agent-banner');
-const mobileDevicePage = $('mobile-device-page');
+const devicePage = $('device-page');
 const mobileProfilePage = $('mobile-profile-page');
 const mainScreen = $('main-screen');
-const relayUrlField = $('relay-url-field');
-const relayUrlInput = $('relay-url-input');
 const settingsBtn = $('settings-btn');
 const settingsModal = $('settings-modal');
 const sessionSearchInput = $('session-search');
 const toast = $('toast');
 const pasteModal = $('paste-modal');
 const pasteModalText = $('paste-modal-text');
-const rememberTokenRow = $('remember-token-row');
-const rememberTokenInput = $('remember-token');
 const sessionActionsModal = $('session-actions-modal');
+const deviceListEl = $('device-list');
+const deviceEmpty = $('device-empty');
+const deviceSearchInput = $('device-search-input');
+const deviceModal = $('device-modal');
+const deviceForm = $('device-form');
+const deviceDeleteModal = $('device-delete-modal');
+const sessionRenameModal = $('session-rename-modal');
+const sessionRenameInput = $('session-rename-input');
+const historyBottomBtn = $('history-bottom-btn');
 const packagedConfig = window.remoteTerminalConfig || {};
 const isPackagedClient = location.protocol === 'file:' || packagedConfig.isPackagedClient === true;
 const mobileModifiers = { ctrl: false, alt: false };
 const clientSettingsStore = new ClientSettings.ClientSettingsStore(localStorage);
+const deviceRegistry = new DeviceStore.DeviceRegistry(localStorage);
 const TOKEN_STORAGE_KEY = 'remote-terminal-token';
-const ACTIVE_SESSION_KEY = 'remote-terminal-active-session';
+const LEGACY_ACTIVE_SESSION_KEY = 'remote-terminal-active-session';
+const PRODUCT_DEFAULT_RELAY_URL = 'wss://webclaude.xmu-zss.cn';
+const CLIENT_UI_VERSION = '0.3.0';
 let clientSettings = clientSettingsStore.get();
 let sessionSearchQuery = '';
+let deviceSearchQuery = '';
 let toastTimer = null;
 let pendingPaste = null;
 let mobileView = 'sessions';
 let mobileLayoutActive = isMobileLayout();
 let mobileViewportBaseline = window.visualViewport?.height || window.innerHeight;
+let activeDeviceToken = '';
+let pendingDeleteDeviceId = '';
+let historyButtonFrame = 0;
+const transientDeviceTokens = new Map();
 
 function isMobileLayout() {
   return matchMedia('(max-width: 760px)').matches;
@@ -111,7 +120,7 @@ function supportsSecureCredentials() {
   }
 }
 
-function readSecureToken() {
+function readLegacySecureToken() {
   try {
     if (typeof packagedConfig.readCredential === 'function') return packagedConfig.readCredential() || '';
     return window.RemoteTerminalNative?.readCredential?.() || '';
@@ -120,27 +129,65 @@ function readSecureToken() {
   }
 }
 
-function writeSecureToken(token) {
+function readDeviceToken(deviceId) {
+  if (!deviceId) return '';
+  if (transientDeviceTokens.has(deviceId)) return transientDeviceTokens.get(deviceId) || '';
   try {
-    if (typeof packagedConfig.writeCredential === 'function') packagedConfig.writeCredential(token);
-    else window.RemoteTerminalNative?.writeCredential?.(token);
+    if (typeof packagedConfig.readDeviceCredential === 'function') {
+      return packagedConfig.readDeviceCredential(deviceId) || '';
+    }
+    return window.RemoteTerminalNative?.readDeviceCredential?.(deviceId) || '';
+  } catch { return ''; }
+}
+
+function writeDeviceToken(deviceId, token) {
+  transientDeviceTokens.set(deviceId, token);
+  if (!supportsSecureCredentials()) {
+    showToast('系统安全存储不可用，Token 仅保留到本次关闭软件');
+    return;
+  }
+  try {
+    let saved;
+    if (typeof packagedConfig.writeDeviceCredential === 'function') {
+      saved = packagedConfig.writeDeviceCredential(deviceId, token);
+    } else {
+      saved = window.RemoteTerminalNative?.writeDeviceCredential?.(deviceId, token);
+    }
+    if (saved === false) throw new Error('Secure credential storage rejected the write');
   } catch {
-    showToast('系统安全存储不可用，Token 未持久化');
+    showToast('系统安全存储写入失败，Token 仅保留到本次关闭软件');
   }
 }
 
-function clearSecureToken() {
+function clearDeviceToken(deviceId) {
+  transientDeviceTokens.delete(deviceId);
   try {
-    if (typeof packagedConfig.clearCredential === 'function') packagedConfig.clearCredential();
-    else window.RemoteTerminalNative?.clearCredential?.();
-  } catch { /* secure store is best-effort during logout */ }
+    if (typeof packagedConfig.clearDeviceCredential === 'function') {
+      packagedConfig.clearDeviceCredential(deviceId);
+    } else {
+      window.RemoteTerminalNative?.clearDeviceCredential?.(deviceId);
+    }
+  } catch { /* secure store cleanup is best-effort during device deletion */ }
+}
+
+function nativeDefaultRelayUrl() {
+  try {
+    return packagedConfig.defaultRelayUrl ||
+      window.RemoteTerminalNative?.getDefaultRelayUrl?.() ||
+      PRODUCT_DEFAULT_RELAY_URL;
+  } catch {
+    return PRODUCT_DEFAULT_RELAY_URL;
+  }
 }
 
 function normalizeRelayUrl(value) {
-  const url = new URL(value);
+  const input = String(value || '').trim();
+  if (!input) throw new Error('请填写中转域名或地址');
+  const url = new URL(/^[A-Za-z][A-Za-z0-9+.-]*:\/\//.test(input) ? input : `wss://${input}`);
   if (url.protocol === 'https:') url.protocol = 'wss:';
   else if (url.protocol === 'http:') url.protocol = 'ws:';
   if (!['wss:', 'ws:'].includes(url.protocol)) throw new Error('中转地址必须使用 HTTPS 或 WSS');
+  if (url.username || url.password) throw new Error('中转地址不能包含用户名或密码，请把 Token 单独填写');
   const isLocal = ['localhost', '127.0.0.1', '[::1]'].includes(url.hostname);
   if (url.protocol === 'ws:' && !isLocal) throw new Error('远程中转必须使用 HTTPS/WSS 加密连接');
   url.hash = '';
@@ -148,13 +195,13 @@ function normalizeRelayUrl(value) {
 }
 
 function getRelayUrl() {
+  const activeDevice = deviceRegistry.getActive();
+  if (activeDevice) return normalizeRelayUrl(activeDevice.relayUrl);
   if (!isPackagedClient) {
     const protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
     return `${protocol}//${location.host}`;
   }
-  const configured = localStorage.getItem('remote-terminal-relay-url') || packagedConfig.defaultRelayUrl || '';
-  if (!configured) throw new Error('请先填写阿里云中转地址');
-  return normalizeRelayUrl(configured);
+  throw new Error('请先在“设备”页面添加并选择设备');
 }
 
 function renderMobileModifiers() {
@@ -196,30 +243,254 @@ function setNativeSystemBarStyle(style) {
   } catch { /* 浏览器和桌面客户端没有该桥接时无需处理 */ }
 }
 
+function activeDeviceId() {
+  return deviceRegistry.getActive()?.id || '';
+}
+
+function activeSessionStorageKey() {
+  return activeDeviceId() ? `${LEGACY_ACTIVE_SESSION_KEY}:${activeDeviceId()}` : LEGACY_ACTIVE_SESSION_KEY;
+}
+
+function displaySessionTitle(session) {
+  if (!session) return '未命名会话';
+  return deviceRegistry.getSessionAlias(activeDeviceId(), session.id) || session.title || '未命名会话';
+}
+
+function pinnedSessionKey(sessionId) {
+  return `${activeDeviceId()}:${sessionId}`;
+}
+
+function isSessionPinned(sessionId) {
+  const scoped = pinnedSessionKey(sessionId);
+  return clientSettings.pinnedSessionIds.includes(scoped) ||
+    (!activeDeviceId() && clientSettings.pinnedSessionIds.includes(sessionId));
+}
+
+function formatLastConnected(value) {
+  if (!value) return '尚未连接';
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return '尚未连接';
+  return new Intl.DateTimeFormat('zh-CN', { month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit' }).format(date);
+}
+
+function deriveDeviceName(relayUrl) {
+  try {
+    return new URL(normalizeRelayUrl(relayUrl)).hostname || '我的设备';
+  } catch {
+    return '我的设备';
+  }
+}
+
+function buildDeviceCard(device) {
+  const selected = device.id === activeDeviceId();
+  const relayConnected = selected && STATE.authenticated;
+  const online = selected && STATE.authenticated && STATE.agentOnline;
+  const card = document.createElement('article');
+  card.className = `managed-device-card${selected ? ' active' : ''}`;
+  card.dataset.deviceId = device.id;
+
+  const head = document.createElement('div');
+  head.className = 'device-card-head';
+  const icon = document.createElement('div');
+  icon.className = 'managed-device-icon';
+  icon.innerHTML = `<span>&gt;_</span><i class="${online ? 'online' : ''}"></i>`;
+  const title = document.createElement('div');
+  title.className = 'device-card-title';
+  const name = document.createElement('h2');
+  name.textContent = device.name;
+  const status = document.createElement('p');
+  status.textContent = online
+    ? '在线，可以操作终端'
+    : (relayConnected ? '中转已连接，受控端离线' : (selected ? '当前设备，等待连接' : '已安全保存'));
+  title.append(name, status);
+  head.append(icon, title);
+  if (selected) {
+    const badge = document.createElement('span');
+    badge.className = 'device-selected-badge';
+    badge.textContent = '当前设备';
+    head.appendChild(badge);
+  }
+
+  const endpoint = document.createElement('div');
+  endpoint.className = 'device-endpoint';
+  endpoint.textContent = device.relayUrl;
+
+  const meta = document.createElement('div');
+  meta.className = 'device-card-meta';
+  const sessions = selected ? `${STATE.sessions.length} 个会话` : '会话按设备隔离';
+  meta.append(
+    Object.assign(document.createElement('span'), { textContent: sessions }),
+    Object.assign(document.createElement('span'), { textContent: `最近：${formatLastConnected(device.lastConnectedAt)}` }),
+  );
+
+  const actions = document.createElement('div');
+  actions.className = 'device-card-actions';
+  const select = document.createElement('button');
+  select.type = 'button';
+  select.className = 'device-select-button';
+  select.textContent = selected && STATE.authenticated ? '正在使用' : (selected ? '连接设备' : '选择并连接');
+  select.disabled = selected && STATE.authenticated;
+  select.addEventListener('click', () => activateDevice(device.id));
+  const edit = document.createElement('button');
+  edit.type = 'button';
+  edit.className = 'device-edit-button';
+  edit.textContent = '编辑';
+  edit.addEventListener('click', () => openDeviceModal(device.id));
+  const remove = document.createElement('button');
+  remove.type = 'button';
+  remove.className = 'device-delete-button';
+  remove.textContent = '删除';
+  remove.addEventListener('click', () => openDeviceDelete(device.id));
+  actions.append(select, edit, remove);
+
+  card.append(head, endpoint, meta, actions);
+  return card;
+}
+
+function renderDeviceList() {
+  const devices = deviceRegistry.list(deviceSearchQuery);
+  const allDevices = deviceRegistry.list();
+  deviceListEl.innerHTML = '';
+  for (const device of devices) deviceListEl.appendChild(buildDeviceCard(device));
+  $('device-count-label').textContent = deviceSearchQuery
+    ? `${devices.length} / ${allDevices.length} 台设备`
+    : `${allDevices.length} 台设备`;
+  deviceEmpty.classList.toggle('hidden', allDevices.length > 0 || !!deviceSearchQuery);
+  deviceListEl.classList.toggle('hidden', allDevices.length === 0 && !deviceSearchQuery);
+  if (allDevices.length > 0 && devices.length === 0) {
+    const noMatch = document.createElement('div');
+    noMatch.className = 'device-empty';
+    noMatch.innerHTML = '<h2>没有找到设备</h2><p>试试设备名称或中转地址中的其他关键词。</p>';
+    deviceListEl.appendChild(noMatch);
+  }
+}
+
+function openDevicePage() {
+  renderDeviceList();
+  if (isMobileLayout()) setMobileView('device');
+  else {
+    mainScreen.dataset.desktopView = 'devices';
+    requestAnimationFrame(() => deviceSearchInput?.focus());
+  }
+}
+
+function openTerminalPage() {
+  if (isMobileLayout()) {
+    setMobileView(STATE.activeId ? 'terminal' : 'sessions');
+    return;
+  }
+  mainScreen.dataset.desktopView = 'terminal';
+  if (STATE.activeId) selectSession(STATE.activeId);
+}
+
+function closeDeviceModal() {
+  deviceModal.classList.add('hidden');
+  $('device-form-error').classList.add('hidden');
+}
+
+function openDeviceModal(deviceId = '') {
+  const device = deviceId ? deviceRegistry.get(deviceId) : null;
+  $('device-edit-id').value = device?.id || '';
+  $('device-modal-title').textContent = device ? '编辑设备' : '添加设备';
+  $('device-name-input').value = device?.name || '';
+  $('device-relay-input').value = device?.relayUrl || nativeDefaultRelayUrl();
+  $('device-token-input').value = '';
+  $('device-token-input').required = !device;
+  $('device-token-hint').textContent = device
+    ? '留空表示继续使用已保存的 Token；输入新 Token 会安全替换。'
+    : 'Token 仅写入系统安全凭据存储，不进入普通配置。';
+  $('device-save-btn').textContent = device ? '保存并重新连接' : '保存并连接';
+  $('device-form-error').classList.add('hidden');
+  deviceModal.classList.remove('hidden');
+  requestAnimationFrame(() => $('device-name-input').focus());
+}
+
+function openDeviceDelete(deviceId) {
+  const device = deviceRegistry.get(deviceId);
+  if (!device) return;
+  pendingDeleteDeviceId = deviceId;
+  $('device-delete-text').textContent = `确认删除“${device.name}”？本机保存的 Token 和会话别名会一起清除，但不会删除远端会话。`;
+  deviceDeleteModal.classList.remove('hidden');
+}
+
+function resetCurrentDeviceState() {
+  cancelAgentOfflineTimers();
+  for (const [id] of [...terminals]) disposeTerminal(id);
+  STATE.ws = null;
+  STATE.clientId = null;
+  STATE.authenticated = false;
+  STATE.agentOnline = false;
+  STATE.agentName = '';
+  STATE.sessions = [];
+  STATE.activeId = null;
+  STATE.splitMode = false;
+  sessionSearchQuery = '';
+  sessionSearchInput.value = '';
+  renderSessionList();
+  updateActiveHeader();
+  updateAgentStatus();
+  historyBottomBtn.classList.add('hidden');
+}
+
+function activateDevice(deviceId, options = {}) {
+  const device = deviceRegistry.get(deviceId);
+  if (!device) return;
+  wsClient.disconnect(1000, 'Switching device');
+  resetCurrentDeviceState();
+  deviceRegistry.select(deviceId);
+  activeDeviceToken = readDeviceToken(deviceId);
+  wsClient.enableReconnect();
+  wsClient.resetBackoff();
+  renderDeviceList();
+  updateMobileOverview();
+  if (isMobileLayout()) setMobileView(options.keepDevicePage ? 'device' : 'sessions');
+  else mainScreen.dataset.desktopView = options.keepDevicePage ? 'devices' : 'terminal';
+  if (!activeDeviceToken) {
+    showToast('该设备缺少 Token，请编辑设备后连接');
+    openDeviceModal(deviceId);
+    return;
+  }
+  connect();
+}
+
+function migrateLegacyDevice() {
+  if (deviceRegistry.list().length > 0) return;
+  const legacyRelay = localStorage.getItem('remote-terminal-relay-url') || '';
+  const legacyToken = sessionStorage.getItem(TOKEN_STORAGE_KEY) ||
+    sessionStorage.getItem('claude-web-token') || readLegacySecureToken();
+  if (!legacyRelay && !legacyToken) return;
+  const id = uuid();
+  let relayUrl;
+  try {
+    relayUrl = normalizeRelayUrl(legacyRelay || nativeDefaultRelayUrl());
+  } catch {
+    relayUrl = normalizeRelayUrl(nativeDefaultRelayUrl());
+  }
+  deviceRegistry.add({ id, name: deriveDeviceName(relayUrl), relayUrl, createdAt: Date.now() });
+  if (legacyToken) writeDeviceToken(id, legacyToken);
+  sessionStorage.removeItem(TOKEN_STORAGE_KEY);
+  sessionStorage.removeItem('claude-web-token');
+  localStorage.removeItem('remote-terminal-relay-url');
+}
+
 function updateMobileOverview() {
   const sessionCount = STATE.sessions.length;
   const runningCount = STATE.sessions.filter((session) => session.status === 'running').length;
-  const agentName = STATE.agentName || '本地 Agent';
-  const relay = localStorage.getItem('remote-terminal-relay-url') || packagedConfig.defaultRelayUrl || location.host || '未配置';
+  const device = deviceRegistry.getActive();
+  const displayName = device?.name || '尚未添加设备';
 
   $('mobile-session-count').textContent = `${sessionCount} 个会话`;
-  $('mobile-agent-title').textContent = STATE.agentOnline ? `${agentName} 已连接` : `${agentName} 未连接`;
-  $('mobile-agent-subtitle').textContent = STATE.agentOnline
+  $('mobile-agent-title').textContent = STATE.agentOnline ? `${displayName} 已连接` : displayName;
+  $('mobile-agent-subtitle').textContent = !device
+    ? '点此添加并选择设备'
+    : STATE.agentOnline
     ? `${runningCount} 个会话正在运行`
-    : '点此查看连接状态与重连';
+    : '点此查看设备或重新连接';
   $('mobile-agent-dot').className = `status-dot ${STATE.agentOnline ? 'online' : 'offline'}`;
   mobileAgentBanner.classList.toggle('online', STATE.agentOnline);
 
-  $('mobile-device-name').textContent = agentName;
-  $('mobile-device-state').textContent = STATE.agentOnline ? '在线，可以创建和操作会话' : '当前离线，正在等待重连';
-  $('mobile-device-status-dot').className = STATE.agentOnline ? 'online' : 'offline';
-  $('mobile-connection-state').textContent = STATE.agentOnline ? '已连接' : '未连接';
-  $('mobile-connection-state').className = STATE.agentOnline ? 'connection-online' : '';
-  $('mobile-relay-address').textContent = relay;
-  $('mobile-running-count').textContent = String(runningCount);
-
   const active = STATE.sessions.find((session) => session.id === STATE.activeId);
-  mobileCommandSend.disabled = !active || active.status === 'exited';
+  mobileCommandSend.disabled = !STATE.authenticated || !active || active.status === 'exited';
 }
 
 function setMobileView(view, options = {}) {
@@ -258,9 +529,11 @@ function setMobileView(view, options = {}) {
 
 function handleMobileBack() {
   if (!isMobileLayout() || mainScreen.classList.contains('hidden')) return false;
-  for (const modal of [pasteModal, sessionActionsModal, settingsModal, deleteModal]) {
+  for (const modal of [deviceModal, deviceDeleteModal, sessionRenameModal, pasteModal,
+    sessionActionsModal, settingsModal, deleteModal]) {
     if (!modal.classList.contains('hidden')) {
       modal.classList.add('hidden');
+      if (modal === deviceDeleteModal) pendingDeleteDeviceId = '';
       return true;
     }
   }
@@ -335,34 +608,18 @@ function applyClientSettings() {
 }
 
 function openSettings() {
-  $('setting-relay-row').classList.toggle('hidden', !isPackagedClient);
-  $('setting-relay-url').value = localStorage.getItem('remote-terminal-relay-url') || packagedConfig.defaultRelayUrl || '';
   $('setting-font-size').value = String(clientSettings.fontSize);
   $('setting-scrollback').value = String(clientSettings.scrollback);
   $('setting-cursor-blink').checked = clientSettings.cursorBlink;
   $('setting-mobile-keybar').checked = clientSettings.showMobileKeybar;
   $('setting-paste-confirm').checked = clientSettings.confirmLargePaste;
-  $('settings-security-hint').textContent = clientSettings.rememberToken
-    ? '访问 Token 已由当前系统的安全凭据存储保护。退出登录会删除该凭据。'
-    : '中转地址保存在本机；访问 Token 默认只保存在当前运行会话。';
+  $('settings-security-hint').textContent = supportsSecureCredentials()
+    ? '每台设备的 Token 均由系统安全凭据存储独立保护。设备地址和显示设置保存在本机。'
+    : '当前系统未提供可靠的安全凭据存储；Token 只保留到本次关闭软件。';
   settingsModal.classList.remove('hidden');
 }
 
 function saveSettings() {
-  let reconnectForRelayChange = false;
-  if (isPackagedClient) {
-    try {
-      const nextRelay = normalizeRelayUrl($('setting-relay-url').value.trim());
-      const previousRelay = localStorage.getItem('remote-terminal-relay-url') || packagedConfig.defaultRelayUrl || '';
-      reconnectForRelayChange = nextRelay !== previousRelay;
-      localStorage.setItem('remote-terminal-relay-url', nextRelay);
-      relayUrlInput.value = nextRelay;
-    } catch (error) {
-      showToast(error.message || '中转地址格式不正确');
-      $('setting-relay-url').focus();
-      return;
-    }
-  }
   clientSettings = clientSettingsStore.update({
     fontSize: $('setting-font-size').value,
     scrollback: $('setting-scrollback').value,
@@ -373,32 +630,40 @@ function saveSettings() {
   settingsModal.classList.add('hidden');
   applyClientSettings();
   updateMobileOverview();
-  if (reconnectForRelayChange && getToken()) {
-    try { STATE.ws?.close(1000, 'Relay changed'); } catch {}
-    wsClient.resetBackoff();
-    setTimeout(connect, 100);
-  }
   showToast('设置已保存');
 }
 
 function togglePinnedSession(sessionId) {
   const pinned = new Set(clientSettings.pinnedSessionIds);
-  if (pinned.has(sessionId)) pinned.delete(sessionId);
-  else pinned.add(sessionId);
+  const key = pinnedSessionKey(sessionId);
+  if (pinned.has(key)) pinned.delete(key);
+  else pinned.add(key);
   clientSettings = clientSettingsStore.update({ pinnedSessionIds: [...pinned] });
   renderSessionList();
 }
 
 function openSessionActions() {
   if (!STATE.activeId) return;
-  const pinned = clientSettings.pinnedSessionIds.includes(STATE.activeId);
+  const pinned = isSessionPinned(STATE.activeId);
   $('action-pin-session').textContent = pinned ? '取消置顶' : '置顶会话';
   sessionActionsModal.classList.remove('hidden');
 }
 
+function openSessionRename() {
+  const session = STATE.sessions.find((item) => item.id === STATE.activeId);
+  if (!session) return;
+  sessionRenameInput.value = displaySessionTitle(session);
+  sessionActionsModal.classList.add('hidden');
+  sessionRenameModal.classList.remove('hidden');
+  requestAnimationFrame(() => {
+    sessionRenameInput.focus();
+    sessionRenameInput.select();
+  });
+}
+
 mobileBackBtn?.addEventListener('click', () => setMobileView('sessions'));
 mobileSessionMoreBtn?.addEventListener('click', openSessionActions);
-mobileAgentBanner?.addEventListener('click', () => setMobileView('device'));
+mobileAgentBanner?.addEventListener('click', openDevicePage);
 mobileTabbar?.addEventListener('click', (event) => {
   const tab = event.target.closest('[data-mobile-tab]')?.dataset.mobileTab;
   if (tab) setMobileView(tab);
@@ -427,8 +692,11 @@ mobileCommandForm?.addEventListener('submit', (event) => {
   event.preventDefault();
   if (!STATE.activeId) return;
   const command = mobileCommandInput.value;
-  sendTerminalInput(STATE.activeId, `${command}\r`);
-  mobileCommandInput.value = '';
+  if (sendTerminalInput(STATE.activeId, `${command}\r`)) {
+    mobileCommandInput.value = '';
+  } else {
+    showToast('连接尚未就绪，命令已保留');
+  }
 });
 mobileCommandInput?.addEventListener('focus', () => {
   handleMobileViewportChanged(true);
@@ -443,15 +711,108 @@ mobileDirectInput?.addEventListener('click', () => {
   showToast('已切换为直接终端输入');
 });
 $('mobile-reconnect-btn')?.addEventListener('click', () => {
-  wsClient.enableReconnect();
-  wsClient.resetBackoff();
-  connect();
+  const device = deviceRegistry.getActive();
+  if (device) activateDevice(device.id, { keepDevicePage: true });
   showToast('正在重新连接…');
 });
 $('mobile-connection-settings-btn')?.addEventListener('click', openSettings);
 $('mobile-open-settings')?.addEventListener('click', openSettings);
-$('mobile-open-connection')?.addEventListener('click', openSettings);
+$('mobile-open-connection')?.addEventListener('click', openDevicePage);
 $('mobile-logout-btn')?.addEventListener('click', logoutClient);
+$('desktop-devices-btn')?.addEventListener('click', () => {
+  if (mainScreen.dataset.desktopView === 'devices') openTerminalPage();
+  else openDevicePage();
+});
+$('desktop-device-back')?.addEventListener('click', openTerminalPage);
+$('add-device-btn')?.addEventListener('click', () => openDeviceModal());
+$('device-empty-add')?.addEventListener('click', () => openDeviceModal());
+deviceSearchInput?.addEventListener('input', () => {
+  deviceSearchQuery = deviceSearchInput.value;
+  renderDeviceList();
+});
+$('device-modal-close')?.addEventListener('click', closeDeviceModal);
+$('device-modal-cancel')?.addEventListener('click', closeDeviceModal);
+deviceForm?.addEventListener('submit', (event) => {
+  event.preventDefault();
+  const editingId = $('device-edit-id').value;
+  const token = $('device-token-input').value.trim();
+  let relayUrl;
+  try {
+    relayUrl = normalizeRelayUrl($('device-relay-input').value);
+    const name = $('device-name-input').value.trim() || deriveDeviceName(relayUrl);
+    if (editingId) {
+      if (!token && !readDeviceToken(editingId)) throw new Error('请填写该设备的访问 Token');
+      deviceRegistry.update(editingId, { name, relayUrl });
+      if (token) writeDeviceToken(editingId, token);
+      closeDeviceModal();
+      activateDevice(editingId);
+    } else {
+      if (!token) throw new Error('请填写该设备的访问 Token');
+      const deviceId = uuid();
+      deviceRegistry.add({ id: deviceId, name, relayUrl, createdAt: Date.now() });
+      writeDeviceToken(deviceId, token);
+      closeDeviceModal();
+      activateDevice(deviceId);
+    }
+  } catch (error) {
+    $('device-form-error').textContent = error.message || '设备信息保存失败';
+    $('device-form-error').classList.remove('hidden');
+  }
+});
+$('device-delete-cancel')?.addEventListener('click', () => {
+  pendingDeleteDeviceId = '';
+  deviceDeleteModal.classList.add('hidden');
+});
+$('device-delete-confirm')?.addEventListener('click', () => {
+  const deletingId = pendingDeleteDeviceId;
+  pendingDeleteDeviceId = '';
+  deviceDeleteModal.classList.add('hidden');
+  if (!deletingId) return;
+  const wasActive = deletingId === activeDeviceId();
+  if (wasActive) wsClient.disconnect(1000, 'Device removed');
+  clearDeviceToken(deletingId);
+  localStorage.removeItem(`${LEGACY_ACTIVE_SESSION_KEY}:${deletingId}`);
+  const pinPrefix = `${deletingId}:`;
+  if (clientSettings.pinnedSessionIds.some((item) => item.startsWith(pinPrefix))) {
+    clientSettings = clientSettingsStore.update({
+      pinnedSessionIds: clientSettings.pinnedSessionIds.filter((item) => !item.startsWith(pinPrefix)),
+    });
+  }
+  deviceRegistry.remove(deletingId);
+  if (wasActive) {
+    resetCurrentDeviceState();
+    const next = deviceRegistry.getActive();
+    if (next) activateDevice(next.id, { keepDevicePage: true });
+    else {
+      activeDeviceToken = '';
+      openDevicePage();
+    }
+  }
+  renderDeviceList();
+  updateMobileOverview();
+  showToast('设备已删除');
+});
+$('action-rename-session')?.addEventListener('click', openSessionRename);
+renameSessionBtn?.addEventListener('click', openSessionRename);
+$('session-rename-cancel')?.addEventListener('click', () => sessionRenameModal.classList.add('hidden'));
+$('session-rename-form')?.addEventListener('submit', (event) => {
+  event.preventDefault();
+  if (!STATE.activeId || !activeDeviceId()) return;
+  try {
+    deviceRegistry.setSessionAlias(activeDeviceId(), STATE.activeId, sessionRenameInput.value);
+    sessionRenameModal.classList.add('hidden');
+    renderSessionList();
+    updateActiveHeader();
+    showToast('会话名称已保存到本机');
+  } catch (error) {
+    showToast(error.message || '会话重命名失败');
+  }
+});
+historyBottomBtn?.addEventListener('click', () => {
+  const entry = STATE.activeId && terminals.get(STATE.activeId);
+  entry?.term?.scrollToBottom();
+  historyBottomBtn.classList.add('hidden');
+});
 $('action-pin-session')?.addEventListener('click', () => {
   if (STATE.activeId) togglePinnedSession(STATE.activeId);
   sessionActionsModal.classList.add('hidden');
@@ -475,19 +836,7 @@ function uuid() {
         return (c === 'x' ? r : (r & 0x3 | 0x8)).toString(16);
       });
 }
-const getToken = () => sessionStorage.getItem(TOKEN_STORAGE_KEY) || sessionStorage.getItem('claude-web-token') ||
-  (clientSettings.rememberToken && supportsSecureCredentials() ? readSecureToken() : '');
-function saveToken(token) {
-  sessionStorage.setItem(TOKEN_STORAGE_KEY, token);
-  sessionStorage.removeItem('claude-web-token');
-  if (clientSettings.rememberToken && supportsSecureCredentials()) writeSecureToken(token);
-  else clearSecureToken();
-}
-function clearToken() {
-  sessionStorage.removeItem(TOKEN_STORAGE_KEY);
-  sessionStorage.removeItem('claude-web-token');
-  clearSecureToken();
-}
+const getToken = () => activeDeviceToken;
 
 const wsClient = new StrictWebSocket.StrictWebSocketClient({
   createSocket: (url) => new WebSocket(url),
@@ -502,9 +851,13 @@ const wsClient = new StrictWebSocket.StrictWebSocketClient({
     STATE.agentOnline = false;
     markAllTerminalsUnsubscribed();
     updateAgentStatus();
+    renderDeviceList();
   },
-  onNoToken: showLogin,
-  onError: () => {},
+  onNoToken: () => updateMobileOverview(),
+  onError: () => {
+    if (activeDeviceId() && !STATE.authenticated) showToast('设备连接失败，正在自动重试');
+  },
+  handshakeTimeoutMs: 15000,
 });
 
 function sendWS(obj) {
@@ -513,7 +866,8 @@ function sendWS(obj) {
 
 // ── WebSocket ──────────────────────────────────────────────────
 function connect() {
-  wsClient.connect();
+  if (!activeDeviceId() || !getToken()) return false;
+  return wsClient.connect();
 }
 
 // ── 消息分发 ───────────────────────────────────────────────────
@@ -526,6 +880,10 @@ function handleMessage(data) {
       STATE.agentOnline = data.agentOnline;
       STATE.agentName = data.agentName || '';
       STATE.sessions = data.sessions || [];
+      {
+        const device = deviceRegistry.getActive();
+        if (device) deviceRegistry.update(device.id, { lastConnectedAt: Date.now() });
+      }
       if (STATE.agentOnline) cancelAgentOfflineTimers();
       showMain();
       reconcileTerminals();
@@ -533,14 +891,21 @@ function handleMessage(data) {
       updateAgentStatus();
       restoreActive();
       syncVisibleSubscriptions();
+      renderDeviceList();
       break;
 
     case 'error':
       if (!STATE.authenticated) {
         wsClient.disableReconnect();
-        clearToken();
-        showLoginError(data.message || '认证失败');
+        activeDeviceToken = '';
+        showToast(data.message || '设备认证失败，请检查 Token');
+        renderDeviceList();
+        const device = deviceRegistry.getActive();
+        if (device) openDeviceModal(device.id);
       }
+      break;
+
+    case 'pong':
       break;
 
     case 'agent_status':
@@ -639,6 +1004,15 @@ function markStatus(id, status) {
   updateMobileOverview();
 }
 function removeSession(id) {
+  if (activeDeviceId()) {
+    try { deviceRegistry.setSessionAlias(activeDeviceId(), id, ''); } catch {}
+  }
+  const pinKey = pinnedSessionKey(id);
+  if (clientSettings.pinnedSessionIds.includes(pinKey)) {
+    clientSettings = clientSettingsStore.update({
+      pinnedSessionIds: clientSettings.pinnedSessionIds.filter((item) => item !== pinKey),
+    });
+  }
   STATE.sessions = STATE.sessions.filter((x) => x.id !== id);
   const t = terminals.get(id);
   if (t) { disposeTerminal(id); }
@@ -649,9 +1023,9 @@ function removeSession(id) {
     if (isMobileLayout()) {
       if (next) {
         STATE.activeId = next.id;
-        localStorage.setItem(ACTIVE_SESSION_KEY, next.id);
+        localStorage.setItem(activeSessionStorageKey(), next.id);
       } else {
-        localStorage.removeItem(ACTIVE_SESSION_KEY);
+        localStorage.removeItem(activeSessionStorageKey());
       }
       updateActiveHeader();
       setMobileView('sessions');
@@ -688,13 +1062,13 @@ function cleanDisconnectedSessions() {
   STATE.sessions = STATE.sessions.filter(s => !staleIds.has(s.id));
   if (STATE.activeId && staleIds.has(STATE.activeId)) {
     STATE.activeId = null;
-    localStorage.removeItem(ACTIVE_SESSION_KEY);
+    localStorage.removeItem(activeSessionStorageKey());
     localStorage.removeItem('claude-web-active');
     const next = STATE.sessions.find(s => s.status === 'running');
     if (isMobileLayout()) {
       if (next) {
         STATE.activeId = next.id;
-        localStorage.setItem(ACTIVE_SESSION_KEY, next.id);
+        localStorage.setItem(activeSessionStorageKey(), next.id);
       }
       updateActiveHeader();
       setMobileView('sessions');
@@ -712,7 +1086,7 @@ function reconcileTerminals() {
   }
   if (STATE.activeId && !ids.has(STATE.activeId)) {
     STATE.activeId = null;
-    localStorage.removeItem(ACTIVE_SESSION_KEY);
+    localStorage.removeItem(activeSessionStorageKey());
     localStorage.removeItem('claude-web-active');
     if (isMobileLayout()) setMobileView('sessions');
   }
@@ -734,6 +1108,9 @@ function ensureTerminal(sessionId) {
     fontFamily: '"SFMono-Regular", Menlo, Monaco, Consolas, "Liberation Mono", "Noto Sans Mono CJK SC", "Noto Sans CJK SC", "PingFang SC", "Microsoft YaHei", monospace',
     theme: { background: '#0d1117', foreground: '#e6edf3' },
     scrollback: clientSettings.scrollback,
+    scrollSensitivity: 1,
+    fastScrollSensitivity: 5,
+    scrollOnUserInput: false,
     allowProposedApi: true,
   });
   const fit = new FitAddon.FitAddon();
@@ -745,6 +1122,7 @@ function ensureTerminal(sessionId) {
 
   // 键入 → 发送到 Agent
   term.onData((d) => sendTerminalInput(sessionId, d));
+  term.onScroll(() => scheduleHistoryButtonUpdate(sessionId));
 
   // Ctrl+V / Cmd+V: 拦截浏览器默认粘贴，改为读取纯文本
   term.attachCustomKeyEventHandler((e) => {
@@ -778,7 +1156,10 @@ function ensureTerminal(sessionId) {
     onSnapshotApplied: () => {
       const current = terminals.get(sessionId);
       if (!current || current.container.style.display === 'none') return;
-      requestAnimationFrame(() => fitTerminal(sessionId));
+      requestAnimationFrame(() => {
+        fitTerminal(sessionId);
+        scheduleHistoryButtonUpdate(sessionId);
+      });
     },
   });
   const entry = {
@@ -790,6 +1171,7 @@ function ensureTerminal(sessionId) {
     subscribed: false,
     observer,
     lastActivity: 0,
+    historyWarningShown: false,
   };
   terminals.set(sessionId, entry);
   return entry;
@@ -813,7 +1195,31 @@ function applyTerminalSnapshot(data) {
     sendWS({ type: 'terminal_detach', sessionId: data.sessionId });
     return;
   }
+  if (data.historyTruncated && !t.historyWarningShown) {
+    t.historyWarningShown = true;
+    showToast('该会话内容较多，当前已加载服务器保留的最近历史');
+  }
   t.stream.applySnapshot(data);
+  scheduleHistoryButtonUpdate(data.sessionId);
+}
+
+function updateHistoryButton(sessionId = STATE.activeId) {
+  const entry = sessionId && terminals.get(sessionId);
+  if (!entry || sessionId !== STATE.activeId || entry.container.style.display === 'none') {
+    historyBottomBtn.classList.add('hidden');
+    return;
+  }
+  const buffer = entry.term.buffer.active;
+  historyBottomBtn.classList.toggle('hidden', buffer.viewportY >= buffer.baseY);
+}
+
+function scheduleHistoryButtonUpdate(sessionId = STATE.activeId) {
+  if (sessionId !== STATE.activeId) return;
+  if (historyButtonFrame) cancelAnimationFrame(historyButtonFrame);
+  historyButtonFrame = requestAnimationFrame(() => {
+    historyButtonFrame = 0;
+    updateHistoryButton(sessionId);
+  });
 }
 
 function requestTerminalResync(sessionId) {
@@ -870,17 +1276,19 @@ function fitTerminal(sessionId) {
 function selectSession(sessionId) {
   if (!STATE.sessions.find((s) => s.id === sessionId)) return;
   STATE.activeId = sessionId;
-  localStorage.setItem(ACTIVE_SESSION_KEY, sessionId);
+  localStorage.setItem(activeSessionStorageKey(), sessionId);
   localStorage.removeItem('claude-web-active');
 
   if (isMobileLayout()) {
     STATE.splitMode = false;
     setMobileView('terminal');
   } else if (STATE.splitMode) {
+    mainScreen.dataset.desktopView = 'terminal';
     refreshTileView();
     const entry = terminals.get(sessionId);
     if (entry) entry.term.focus();
   } else {
+    mainScreen.dataset.desktopView = 'terminal';
     // 单屏模式：只显示当前终端
     emptyHint.style.display = 'none';
     for (const [id, t] of terminals) {
@@ -900,6 +1308,7 @@ function selectSession(sessionId) {
 
   renderSessionList();
   updateActiveHeader();
+  scheduleHistoryButtonUpdate(sessionId);
 }
 
 // ── 分屏模式 ────────────────────────────────────────────────────
@@ -981,11 +1390,13 @@ function refreshTileView() {
 }
 
 function restoreActive() {
-  const saved = localStorage.getItem(ACTIVE_SESSION_KEY) || localStorage.getItem('claude-web-active');
+  const saved = localStorage.getItem(activeSessionStorageKey()) ||
+    localStorage.getItem(LEGACY_ACTIVE_SESSION_KEY) || localStorage.getItem('claude-web-active');
   const target = STATE.sessions.find((s) => s.id === saved) || STATE.sessions[0];
   if (target && isMobileLayout()) {
     STATE.activeId = target.id;
-    localStorage.setItem(ACTIVE_SESSION_KEY, target.id);
+    localStorage.setItem(activeSessionStorageKey(), target.id);
+    localStorage.removeItem(LEGACY_ACTIVE_SESSION_KEY);
     updateActiveHeader();
     renderSessionList();
     setMobileView('sessions');
@@ -993,7 +1404,7 @@ function restoreActive() {
     selectSession(target.id);
   } else {
     STATE.activeId = null;
-    localStorage.removeItem(ACTIVE_SESSION_KEY);
+    localStorage.removeItem(activeSessionStorageKey());
     localStorage.removeItem('claude-web-active');
     updateActiveHeader();
     if (isMobileLayout()) setMobileView('sessions');
@@ -1006,20 +1417,25 @@ function newSession() {
   const now = new Date();
   const title = '终端 ' + String(now.getHours()).padStart(2,'0') + ':' + String(now.getMinutes()).padStart(2,'0');
   const id = uuid();
-  sendWS({ type: 'terminal_create', sessionId: id, title });
+  if (!sendWS({ type: 'terminal_create', sessionId: id, title })) {
+    showToast('连接尚未就绪，暂时无法创建会话');
+  }
 }
 
 function openDeleteModal() {
   if (!STATE.activeId) return;
   const s = STATE.sessions.find((x) => x.id === STATE.activeId);
-  deleteModalText.textContent = `确认删除会话「${s ? s.title : ''}」？终端进程将被终止。`;
+  deleteModalText.textContent = `确认删除会话「${displaySessionTitle(s)}」？终端进程将被终止。`;
   deleteModal.classList.remove('hidden');
 }
 function confirmDelete() {
   const id = STATE.activeId;
   if (!id) return;
-  sendWS({ type: 'terminal_delete', sessionId: id });
-  deleteModal.classList.add('hidden');
+  if (sendWS({ type: 'terminal_delete', sessionId: id })) {
+    deleteModal.classList.add('hidden');
+  } else {
+    showToast('连接尚未就绪，会话尚未删除');
+  }
 }
 
 // ── 会话活动状态 ───────────────────────────────────────────────
@@ -1083,11 +1499,10 @@ function renderSessionList() {
 
 function getVisibleSessions() {
   const query = sessionSearchQuery.trim().toLocaleLowerCase();
-  const pinned = new Set(clientSettings.pinnedSessionIds);
   return STATE.sessions
     .map((session, index) => ({ session, index }))
-    .filter(({ session }) => !query || `${session.title || ''}\n${session.cwd || ''}`.toLocaleLowerCase().includes(query))
-    .sort((a, b) => Number(pinned.has(b.session.id)) - Number(pinned.has(a.session.id)) ||
+    .filter(({ session }) => !query || `${displaySessionTitle(session)}\n${session.title || ''}\n${session.cwd || ''}`.toLocaleLowerCase().includes(query))
+    .sort((a, b) => Number(isSessionPinned(b.session.id)) - Number(isSessionPinned(a.session.id)) ||
       sessionRecency(b.session) - sessionRecency(a.session) || b.index - a.index)
     .map(({ session }) => session);
 }
@@ -1105,7 +1520,7 @@ function buildSessionItem(s) {
   li.setAttribute('data-sid', s.id);
   li.tabIndex = 0;
 
-  li.setAttribute('aria-label', `${s.title || '未命名会话'}，${statusText(s.status)}`);
+  li.setAttribute('aria-label', `${displaySessionTitle(s)}，${statusText(s.status)}`);
 
   const avatar = document.createElement('div');
   avatar.className = 'session-avatar';
@@ -1120,7 +1535,7 @@ function buildSessionItem(s) {
   meta.className = 's-meta';
   const titleEl = document.createElement('span');
   titleEl.className = 's-title';
-  titleEl.textContent = s.title || '';
+  titleEl.textContent = displaySessionTitle(s);
   meta.appendChild(titleEl);
   const cwdEl = document.createElement('span');
   cwdEl.className = 's-cwd';
@@ -1129,7 +1544,7 @@ function buildSessionItem(s) {
   li.appendChild(meta);
 
   const pin = document.createElement('button');
-  const isPinned = clientSettings.pinnedSessionIds.includes(s.id);
+  const isPinned = isSessionPinned(s.id);
   pin.className = 'session-pin' + (isPinned ? ' pinned' : '');
   pin.type = 'button';
   pin.textContent = isPinned ? '★' : '☆';
@@ -1159,7 +1574,7 @@ function buildSessionItem(s) {
   li.oncontextmenu = (event) => {
     event.preventDefault();
     STATE.activeId = s.id;
-    localStorage.setItem(ACTIVE_SESSION_KEY, s.id);
+    localStorage.setItem(activeSessionStorageKey(), s.id);
     renderSessionList();
     updateActiveHeader();
     openSessionActions();
@@ -1225,16 +1640,18 @@ function updateActiveHeader() {
     activeStatus.textContent = '';
     activeStatus.className = 'badge';
     deleteBtn.disabled = true;
+    renameSessionBtn.disabled = true;
     mobileSessionMoreBtn.disabled = true;
     if (terminals.size === 0) emptyHint.style.display = '';
     updateMobileOverview();
     return;
   }
-  activeTitle.textContent = s.title;
+  activeTitle.textContent = displaySessionTitle(s);
   activeCwd.textContent = s.cwd || '';
   activeStatus.textContent = statusText(s.status);
   activeStatus.className = 'badge ' + (s.status === 'running' ? 'ok' : 'warn');
   deleteBtn.disabled = false;
+  renameSessionBtn.disabled = false;
   mobileSessionMoreBtn.disabled = false;
   updateMobileOverview();
 }
@@ -1260,75 +1677,27 @@ function shortPath(p) {
   const parts = p.split('/');
   return parts.length > 3 ? '…/' + parts.slice(-2).join('/') : p;
 }
-function escapeHtml(t) {
-  const d = document.createElement('div');
-  d.textContent = t == null ? '' : t;
-  return d.innerHTML;
-}
-
 // ── 屏幕切换 ───────────────────────────────────────────────────
-function showLogin() {
-  loginScreen.classList.remove('hidden');
-  mainScreen.classList.add('hidden');
-  setNativeSystemBarStyle('light');
-}
 function showMain() {
-  loginScreen.classList.add('hidden');
   mainScreen.classList.remove('hidden');
   if (isMobileLayout()) setMobileView(mobileView);
   // 启动 activity 刷新定时器
   ensureActivityTimer();
 }
-function showLoginError(msg) {
-  loginError.textContent = msg;
-  loginError.classList.remove('hidden');
-  loginBtn.disabled = false;
-}
 
 function logoutClient() {
   wsClient.disableReconnect();
-  clearToken();
-  clientSettings = clientSettingsStore.update({ rememberToken: false });
-  rememberTokenInput.checked = false;
-  try { STATE.ws?.close(1000, 'User logged out'); } catch {}
-  for (const [id] of [...terminals]) disposeTerminal(id);
-  STATE.sessions = [];
-  STATE.activeId = null;
-  STATE.authenticated = false;
-  STATE.agentOnline = false;
-  localStorage.removeItem(ACTIVE_SESSION_KEY);
-  localStorage.removeItem('claude-web-active');
+  wsClient.disconnect(1000, 'Device disconnected');
+  activeDeviceToken = '';
+  resetCurrentDeviceState();
   settingsModal.classList.add('hidden');
-  renderSessionList();
-  mobileView = 'sessions';
-  mainScreen.dataset.mobileView = 'sessions';
-  showLogin();
+  showMain();
+  renderDeviceList();
+  openDevicePage();
+  showToast('已断开当前设备；本机保存的设备信息仍然保留');
 }
 
 // ── 事件 ───────────────────────────────────────────────────────
-loginForm.addEventListener('submit', (e) => {
-  e.preventDefault();
-  const t = tokenInput.value.trim();
-  if (!t) return;
-  loginBtn.disabled = true;
-  loginError.classList.add('hidden');
-  if (isPackagedClient) {
-    try {
-      const relayUrl = normalizeRelayUrl(relayUrlInput.value.trim());
-      localStorage.setItem('remote-terminal-relay-url', relayUrl);
-    } catch (error) {
-      showLoginError(error.message);
-      return;
-    }
-  }
-  clientSettings = clientSettingsStore.update({
-    rememberToken: supportsSecureCredentials() && rememberTokenInput.checked,
-  });
-  wsClient.enableReconnect();
-  wsClient.resetBackoff();
-  saveToken(t);
-  connect();
-});
 newSessionBtn.addEventListener('click', newSession);
 settingsBtn.addEventListener('click', openSettings);
 sessionSearchInput.addEventListener('input', () => {
@@ -1343,12 +1712,10 @@ $('settings-cancel').addEventListener('click', () => settingsModal.classList.add
 $('settings-close').addEventListener('click', () => settingsModal.classList.add('hidden'));
 $('settings-save').addEventListener('click', saveSettings);
 $('settings-reset').addEventListener('click', () => {
-  clearSecureToken();
   clientSettings = clientSettingsStore.reset();
-  rememberTokenInput.checked = false;
   applyClientSettings();
   openSettings();
-  showToast('已恢复默认设置');
+  showToast('显示和交互设置已恢复默认；设备与 Token 未改变');
 });
 $('settings-logout').addEventListener('click', logoutClient);
 $('paste-cancel').addEventListener('click', () => {
@@ -1362,9 +1729,13 @@ $('paste-confirm').addEventListener('click', () => {
   if (paste) sendTerminalInput(paste.sessionId, paste.text);
 });
 
-for (const modal of [settingsModal, pasteModal, sessionActionsModal]) {
+for (const modal of [settingsModal, pasteModal, sessionActionsModal, deleteModal,
+  deviceModal, deviceDeleteModal, sessionRenameModal]) {
   modal.addEventListener('click', (event) => {
-    if (event.target === modal) modal.classList.add('hidden');
+    if (event.target !== modal) return;
+    modal.classList.add('hidden');
+    if (modal === deviceModal) $('device-form-error').classList.add('hidden');
+    if (modal === deviceDeleteModal) pendingDeleteDeviceId = '';
   });
 }
 
@@ -1392,6 +1763,10 @@ document.addEventListener('keydown', (event) => {
     pasteModal.classList.add('hidden');
     sessionActionsModal.classList.add('hidden');
     deleteModal.classList.add('hidden');
+    deviceModal.classList.add('hidden');
+    deviceDeleteModal.classList.add('hidden');
+    sessionRenameModal.classList.add('hidden');
+    pendingDeleteDeviceId = '';
   }
 });
 
@@ -1425,7 +1800,7 @@ window.addEventListener('online', () => {
 });
 
 document.addEventListener('visibilitychange', () => {
-  if (document.visibilityState === 'visible' && getToken()) connect();
+  if (document.visibilityState === 'visible' && activeDeviceId() && getToken()) connect();
 });
 
 // 心跳
@@ -1437,18 +1812,40 @@ setInterval(() => {
 window.RemoteTerminalApp = Object.freeze({
   handleBack: handleMobileBack,
   onViewportChanged: handleMobileViewportChanged,
+  onResume: () => {
+    handleMobileViewportChanged();
+    if (activeDeviceId() && getToken()) {
+      wsClient.enableReconnect();
+      connect();
+    }
+  },
   showSessions: () => setMobileView('sessions'),
 });
 
-if (isPackagedClient) {
-  relayUrlField.classList.remove('hidden');
-  relayUrlInput.value = localStorage.getItem('remote-terminal-relay-url') || packagedConfig.defaultRelayUrl || '';
+function getClientVersion() {
+  try {
+    return packagedConfig.appVersion || window.RemoteTerminalNative?.getClientVersion?.() || CLIENT_UI_VERSION;
+  } catch {
+    return CLIENT_UI_VERSION;
+  }
 }
-if (isPackagedClient && supportsSecureCredentials()) {
-  rememberTokenRow.classList.remove('hidden');
-  rememberTokenInput.checked = clientSettings.rememberToken;
+
+try {
+  migrateLegacyDevice();
+} catch (error) {
+  console.warn('Legacy device migration skipped:', error);
 }
+
 applyClientSettings();
+showMain();
+$('mobile-client-version').textContent = getClientVersion();
+renderDeviceList();
 updateMobileOverview();
-if (getToken()) connect();
-else showLogin();
+const startupDevice = deviceRegistry.getActive();
+if (startupDevice) {
+  activeDeviceToken = readDeviceToken(startupDevice.id);
+  if (activeDeviceToken) connect();
+  else openDevicePage();
+} else {
+  openDevicePage();
+}
