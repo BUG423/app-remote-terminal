@@ -25,13 +25,10 @@ fs.writeFileSync(configPath, JSON.stringify({
   devices: {
     'test-agent': { name: 'test-agent', browserToken, agentToken },
   },
-  serverHost: '127.0.0.1',
-  serverPort: port,
   useTLS: false,
   maxSessions: 3,
   maxBrowsersPerToken: 2,
-  workspaceRoot: path.join(os.tmpdir(), `remote-terminal-ws-${process.pid}`),
-}, null, 2));
+}, null, 2), { mode: 0o600 });
 
 let serverProc;
 const results = [];
@@ -173,6 +170,17 @@ function noMatchingMessage(ws, predicate, waitMs = 150) {
       response.headers['content-security-policy']?.includes("default-src 'none'") &&
       !response.headers['x-powered-by']));
 
+  const malformedSocket = new WebSocket(target);
+  await new Promise((resolve, reject) => {
+    malformedSocket.once('open', resolve);
+    malformedSocket.once('error', reject);
+  });
+  const malformedReply = nextMessage(malformedSocket, (m) => m.type === 'error');
+  malformedSocket.send('null');
+  check('JSON null 被作为协议错误处理而不会触发 Relay 异常',
+    (await malformedReply).message === 'Message must be a JSON object');
+  malformedSocket.close();
+
   const invalidRole = await connect('__bad_role__');
   check('无效 role 被拒绝', invalidRole.msg.type === 'error' && invalidRole.msg.message === 'Invalid role');
   invalidRole.ws.close();
@@ -195,6 +203,24 @@ function noMatchingMessage(ws, predicate, waitMs = 150) {
   const browser = await connect('browser');
   check('浏览器鉴权成功并协商到序列化终端协议',
     browser.msg.type === 'auth_ok' && browser.msg.role === 'browser' && browser.msg.protocolVersion === 2);
+
+  const duplicateInjection = new WebSocket(target);
+  await new Promise((resolve, reject) => {
+    duplicateInjection.once('open', resolve);
+    duplicateInjection.once('error', reject);
+  });
+  const noInjectedSessions = noMatchingMessage(
+    browser.ws,
+    (m) => m.type === 'sessions' && m.sessions?.some((s) => s.id === 'injected-session'),
+    250,
+  );
+  duplicateInjection.send(JSON.stringify({ type: 'auth', token: agentToken, role: 'agent' }));
+  duplicateInjection.send(JSON.stringify({
+    type: 'sessions',
+    sessions: [{ id: 'injected-session', title: 'Injected', cwd: '/tmp', status: 'running', pid: 9 }],
+  }));
+  check('被拒绝的重复 Agent 在关闭竞态中也不能注入会话', await noInjectedSessions);
+  duplicateInjection.close();
 
   const sessions = [
     { id: 'same-1', title: 'Same', cwd: '/tmp/ws', status: 'running', pid: 1 },
@@ -290,12 +316,8 @@ function noMatchingMessage(ws, predicate, waitMs = 150) {
   authoritativeState.dispose();
 
   const legacyBrowser = await connect('browser', browserToken, 1);
-  const legacyReplayPromise = nextMessage(legacyBrowser.ws, (m) =>
-    m.type === 'terminal_output' && m.sessionId === 'same-1' && m.replay === true);
-  legacyBrowser.ws.send(JSON.stringify({ type: 'terminal_attach', sessionId: 'same-1' }));
-  const legacyReplay = await legacyReplayPromise;
-  check('滚动发布期间旧页面仍能收到兼容的完整回放',
-    legacyReplay.data.includes('AGENT_RESTORED_中文') && legacyReplay.seq === 4);
+  check('旧 v1 客户端被明确拒绝，避免双协议状态分叉',
+    legacyBrowser.msg.message === 'Unsupported protocol version');
   legacyBrowser.ws.close();
   await wait(50);
 

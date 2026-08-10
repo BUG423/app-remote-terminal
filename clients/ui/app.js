@@ -5,7 +5,6 @@
 
 // ── 状态 ───────────────────────────────────────────────────────
 const STATE = {
-  ws: null,
   clientId: null,
   authenticated: false,
   agentOnline: false,
@@ -77,6 +76,8 @@ const pasteModal = $('paste-modal');
 const pasteModalText = $('paste-modal-text');
 const sessionActionsModal = $('session-actions-modal');
 const deviceListEl = $('device-list');
+const desktopDeviceListEl = $('desktop-device-list');
+const desktopActiveDeviceName = $('desktop-active-device-name');
 const deviceEmpty = $('device-empty');
 const deviceSearchInput = $('device-search-input');
 const deviceModal = $('device-modal');
@@ -86,14 +87,17 @@ const sessionRenameModal = $('session-rename-modal');
 const sessionRenameInput = $('session-rename-input');
 const historyBottomBtn = $('history-bottom-btn');
 const packagedConfig = window.remoteTerminalConfig || {};
-const isPackagedClient = location.protocol === 'file:' || packagedConfig.isPackagedClient === true;
 const mobileModifiers = { ctrl: false, alt: false };
 const clientSettingsStore = new ClientSettings.ClientSettingsStore(localStorage);
 const deviceRegistry = new DeviceStore.DeviceRegistry(localStorage);
 const TOKEN_STORAGE_KEY = 'remote-terminal-token';
 const LEGACY_ACTIVE_SESSION_KEY = 'remote-terminal-active-session';
 const PRODUCT_DEFAULT_RELAY_URL = 'wss://webclaude.xmu-zss.cn';
-const CLIENT_UI_VERSION = '0.3.0';
+const CLIENT_UI_VERSION = '0.3.3';
+const MAX_TOKEN_LENGTH = 512;
+const MAX_TERMINAL_INPUT_BYTES = 48 * 1024;
+const MAX_TERMINAL_INPUT_TOTAL_BYTES = 512 * 1024;
+const VALID_SESSION_STATUSES = new Set(['running', 'exited', 'disconnected']);
 let clientSettings = clientSettingsStore.get();
 let sessionSearchQuery = '';
 let deviceSearchQuery = '';
@@ -106,6 +110,55 @@ let activeDeviceToken = '';
 let pendingDeleteDeviceId = '';
 let historyButtonFrame = 0;
 const transientDeviceTokens = new Map();
+
+function browserTokenIsValid(value) {
+  return typeof value === 'string' && value.length >= 32 && value.length <= MAX_TOKEN_LENGTH &&
+    new TextEncoder().encode(value).byteLength <= 1024 &&
+    !/change-me|deprecated|your-token|shared-secret/i.test(value);
+}
+
+function requireValidBrowserToken(value) {
+  if (!browserTokenIsValid(value)) {
+    throw new Error('访问 Token 必须为 32-512 个字符，且不能使用示例值');
+  }
+  return value;
+}
+
+function cleanClientText(value, fallback = '', maxLength = 120) {
+  const text = typeof value === 'string'
+    ? value.replace(/[\x00-\x1F\x7F-\x9F]/g, ' ').replace(/\s+/g, ' ').trim()
+    : '';
+  return (text || fallback).slice(0, maxLength);
+}
+
+function validSessionId(value) {
+  return typeof value === 'string' && /^[A-Za-z0-9._:-]{1,128}$/.test(value);
+}
+
+function normalizeSession(value) {
+  if (!value || typeof value !== 'object' || !validSessionId(value.id) ||
+      !VALID_SESSION_STATUSES.has(value.status)) return null;
+  return {
+    id: value.id,
+    title: cleanClientText(value.title, '新会话', 120),
+    cwd: cleanClientText(value.cwd, '', 4096),
+    pid: Number.isInteger(value.pid) && value.pid >= 0 ? value.pid : null,
+    status: value.status,
+    createdAt: Number.isFinite(value.createdAt) && value.createdAt >= 0 ? value.createdAt : Date.now(),
+  };
+}
+
+function normalizeSessionList(value) {
+  const result = [];
+  const seen = new Set();
+  for (const candidate of Array.isArray(value) ? value.slice(0, 100) : []) {
+    const session = normalizeSession(candidate);
+    if (!session || seen.has(session.id)) continue;
+    seen.add(session.id);
+    result.push(session);
+  }
+  return result;
+}
 
 function isMobileLayout() {
   return matchMedia('(max-width: 760px)').matches;
@@ -131,16 +184,23 @@ function readLegacySecureToken() {
 
 function readDeviceToken(deviceId) {
   if (!deviceId) return '';
-  if (transientDeviceTokens.has(deviceId)) return transientDeviceTokens.get(deviceId) || '';
+  if (transientDeviceTokens.has(deviceId)) {
+    const token = transientDeviceTokens.get(deviceId) || '';
+    return browserTokenIsValid(token) ? token : '';
+  }
+  let token = '';
   try {
     if (typeof packagedConfig.readDeviceCredential === 'function') {
-      return packagedConfig.readDeviceCredential(deviceId) || '';
+      token = packagedConfig.readDeviceCredential(deviceId) || '';
+    } else {
+      token = window.RemoteTerminalNative?.readDeviceCredential?.(deviceId) || '';
     }
-    return window.RemoteTerminalNative?.readDeviceCredential?.(deviceId) || '';
-  } catch { return ''; }
+  } catch { /* invalid or unavailable secure storage */ }
+  return browserTokenIsValid(token) ? token : '';
 }
 
 function writeDeviceToken(deviceId, token) {
+  requireValidBrowserToken(token);
   transientDeviceTokens.set(deviceId, token);
   if (!supportsSecureCredentials()) {
     showToast('系统安全存储不可用，Token 仅保留到本次关闭软件');
@@ -188,19 +248,15 @@ function normalizeRelayUrl(value) {
   else if (url.protocol === 'http:') url.protocol = 'ws:';
   if (!['wss:', 'ws:'].includes(url.protocol)) throw new Error('中转地址必须使用 HTTPS 或 WSS');
   if (url.username || url.password) throw new Error('中转地址不能包含用户名或密码，请把 Token 单独填写');
+  if (url.search || url.hash) throw new Error('中转地址不能包含查询参数或片段');
   const isLocal = ['localhost', '127.0.0.1', '[::1]'].includes(url.hostname);
   if (url.protocol === 'ws:' && !isLocal) throw new Error('远程中转必须使用 HTTPS/WSS 加密连接');
-  url.hash = '';
   return url.toString();
 }
 
 function getRelayUrl() {
   const activeDevice = deviceRegistry.getActive();
   if (activeDevice) return normalizeRelayUrl(activeDevice.relayUrl);
-  if (!isPackagedClient) {
-    const protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
-    return `${protocol}//${location.host}`;
-  }
   throw new Error('请先在“设备”页面添加并选择设备');
 }
 
@@ -226,7 +282,26 @@ function applyMobileModifiers(data) {
 }
 
 function sendTerminalInput(sessionId, data) {
-  return sendWS({ type: 'terminal_input', sessionId, data: applyMobileModifiers(data) });
+  const value = applyMobileModifiers(String(data || ''));
+  const bytes = new TextEncoder().encode(value);
+  if (bytes.byteLength > MAX_TERMINAL_INPUT_TOTAL_BYTES) {
+    showToast('单次输入不能超过 512 KiB，请拆分后重试');
+    return false;
+  }
+  if (bytes.byteLength <= MAX_TERMINAL_INPUT_BYTES) {
+    return sendWS({ type: 'terminal_input', sessionId, data: value });
+  }
+  const decoder = new TextDecoder();
+  let start = 0;
+  while (start < bytes.length) {
+    let end = Math.min(start + MAX_TERMINAL_INPUT_BYTES, bytes.length);
+    while (end < bytes.length && end > start && (bytes[end] & 0xc0) === 0x80) end--;
+    if (end === start) end = Math.min(start + MAX_TERMINAL_INPUT_BYTES, bytes.length);
+    const chunk = decoder.decode(bytes.subarray(start, end));
+    if (!sendWS({ type: 'terminal_input', sessionId, data: chunk })) return false;
+    start = end;
+  }
+  return true;
 }
 
 function showToast(message) {
@@ -347,9 +422,70 @@ function buildDeviceCard(device) {
   return card;
 }
 
+function renderDesktopDeviceRail(devices = deviceRegistry.list()) {
+  if (!desktopDeviceListEl) return;
+  const activeId = activeDeviceId();
+  const activeDevice = devices.find((device) => device.id === activeId);
+  desktopActiveDeviceName.textContent = activeDevice?.name || '未选择设备';
+  desktopDeviceListEl.innerHTML = '';
+
+  if (devices.length === 0) {
+    const empty = document.createElement('div');
+    empty.className = 'device-rail-empty';
+    empty.textContent = '暂无设备';
+    desktopDeviceListEl.appendChild(empty);
+    return;
+  }
+
+  for (const device of devices) {
+    const selected = device.id === activeId;
+    const relayConnected = selected && STATE.authenticated;
+    const online = relayConnected && STATE.agentOnline;
+    const statusText = online ? 'Agent 在线' : (relayConnected ? 'Agent 离线' : (selected ? '等待连接' : '已保存'));
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.className = `device-rail-item${selected ? ' active' : ''}`;
+    button.dataset.deviceId = device.id;
+    button.setAttribute('role', 'listitem');
+    button.setAttribute('aria-current', selected ? 'true' : 'false');
+    button.setAttribute('aria-label', `${device.name}，${statusText}`);
+    button.title = `${device.name}\n${statusText}\n${device.relayUrl}`;
+
+    const avatar = document.createElement('span');
+    avatar.className = 'device-rail-avatar';
+    avatar.textContent = Array.from(device.name.trim())[0]?.toLocaleUpperCase() || '>';
+    const dot = document.createElement('i');
+    dot.className = `device-rail-status${online ? ' online' : (relayConnected ? ' relay' : '')}`;
+    avatar.appendChild(dot);
+    const name = document.createElement('span');
+    name.className = 'device-rail-name';
+    name.textContent = device.name;
+    button.append(avatar, name);
+
+    button.addEventListener('click', () => {
+      if (!selected) {
+        activateDevice(device.id);
+        return;
+      }
+      openTerminalPage();
+      if (!activeDeviceToken) activeDeviceToken = readDeviceToken(device.id);
+      if (!activeDeviceToken) {
+        showToast('该设备缺少 Token，请编辑设备后连接');
+        openDeviceModal(device.id);
+      } else if (!STATE.authenticated) {
+        wsClient.enableReconnect();
+        wsClient.resetBackoff();
+        connect();
+      }
+    });
+    desktopDeviceListEl.appendChild(button);
+  }
+}
+
 function renderDeviceList() {
   const devices = deviceRegistry.list(deviceSearchQuery);
   const allDevices = deviceRegistry.list();
+  renderDesktopDeviceRail(allDevices);
   deviceListEl.innerHTML = '';
   for (const device of devices) deviceListEl.appendChild(buildDeviceCard(device));
   $('device-count-label').textContent = deviceSearchQuery
@@ -416,7 +552,6 @@ function openDeviceDelete(deviceId) {
 function resetCurrentDeviceState() {
   cancelAgentOfflineTimers();
   for (const [id] of [...terminals]) disposeTerminal(id);
-  STATE.ws = null;
   STATE.clientId = null;
   STATE.authenticated = false;
   STATE.agentOnline = false;
@@ -467,7 +602,7 @@ function migrateLegacyDevice() {
     relayUrl = normalizeRelayUrl(nativeDefaultRelayUrl());
   }
   deviceRegistry.add({ id, name: deriveDeviceName(relayUrl), relayUrl, createdAt: Date.now() });
-  if (legacyToken) writeDeviceToken(id, legacyToken);
+  if (browserTokenIsValid(legacyToken)) writeDeviceToken(id, legacyToken);
   sessionStorage.removeItem(TOKEN_STORAGE_KEY);
   sessionStorage.removeItem('claude-web-token');
   localStorage.removeItem('remote-terminal-relay-url');
@@ -514,10 +649,9 @@ function setMobileView(view, options = {}) {
     entry.container.style.display = 'block';
     emptyHint.style.display = 'none';
     syncVisibleSubscriptions();
-    requestAnimationFrame(() => requestAnimationFrame(() => {
-      fitTerminal(STATE.activeId);
-      if (options.focusTerminal) entry.term.focus();
-    }));
+    // Android WebView、后台 Electron 窗口和快速视图切换时，rAF 可能暂停；
+    // 统一走带定时器兜底的适配队列，避免终端长期沿用上一个页面的网格尺寸。
+    scheduleFitTerminal(STATE.activeId, options.focusTerminal);
   } else {
     document.activeElement?.blur?.();
     syncVisibleSubscriptions();
@@ -558,7 +692,7 @@ function handleMobileViewportChanged(forcedKeyboardState) {
   mainScreen.classList.toggle('keyboard-open', keyboardOpen);
 
   if (mobileView !== 'terminal' || !STATE.activeId) return;
-  requestAnimationFrame(() => requestAnimationFrame(() => fitTerminal(STATE.activeId)));
+  scheduleFitTerminal(STATE.activeId);
   if (keyboardOpen && commandFocused) {
     setTimeout(() => mobileCommandInput.scrollIntoView({ block: 'nearest' }), 40);
   }
@@ -724,6 +858,7 @@ $('desktop-devices-btn')?.addEventListener('click', () => {
   else openDevicePage();
 });
 $('desktop-device-back')?.addEventListener('click', openTerminalPage);
+$('desktop-rail-add-device')?.addEventListener('click', () => openDeviceModal());
 $('add-device-btn')?.addEventListener('click', () => openDeviceModal());
 $('device-empty-add')?.addEventListener('click', () => openDeviceModal());
 deviceSearchInput?.addEventListener('input', () => {
@@ -740,6 +875,7 @@ deviceForm?.addEventListener('submit', (event) => {
   try {
     relayUrl = normalizeRelayUrl($('device-relay-input').value);
     const name = $('device-name-input').value.trim() || deriveDeviceName(relayUrl);
+    if (token) requireValidBrowserToken(token);
     if (editingId) {
       if (!token && !readDeviceToken(editingId)) throw new Error('请填写该设备的访问 Token');
       deviceRegistry.update(editingId, { name, relayUrl });
@@ -845,7 +981,6 @@ const wsClient = new StrictWebSocket.StrictWebSocketClient({
   },
   getToken,
   onMessage: handleMessage,
-  onSocket: (socket) => { STATE.ws = socket; },
   onDisconnect: () => {
     STATE.authenticated = false;
     STATE.agentOnline = false;
@@ -874,15 +1009,18 @@ function connect() {
 function handleMessage(data) {
   switch (data.type) {
     case 'auth_ok':
+      if (data.role !== 'browser') return;
       wsClient.markAuthenticated();
       STATE.authenticated = true;
-      STATE.clientId = data.clientId;
-      STATE.agentOnline = data.agentOnline;
-      STATE.agentName = data.agentName || '';
-      STATE.sessions = data.sessions || [];
+      STATE.clientId = cleanClientText(data.clientId, '', 128);
+      STATE.agentOnline = data.agentOnline === true;
+      STATE.agentName = cleanClientText(data.agentName, '', 120);
+      STATE.sessions = normalizeSessionList(data.sessions);
       {
         const device = deviceRegistry.getActive();
-        if (device) deviceRegistry.update(device.id, { lastConnectedAt: Date.now() });
+        try {
+          if (device) deviceRegistry.update(device.id, { lastConnectedAt: Date.now() });
+        } catch { /* a storage quota error must not break an authenticated session */ }
       }
       if (STATE.agentOnline) cancelAgentOfflineTimers();
       showMain();
@@ -897,19 +1035,24 @@ function handleMessage(data) {
     case 'error':
       if (!STATE.authenticated) {
         wsClient.disableReconnect();
-        activeDeviceToken = '';
-        showToast(data.message || '设备认证失败，请检查 Token');
+        const message = cleanClientText(data.message, '设备认证失败，请检查 Token', 1000);
+        const tokenRejected = /invalid token/i.test(message);
+        if (tokenRejected) {
+          clearDeviceToken(activeDeviceId());
+          activeDeviceToken = '';
+        }
+        showToast(message);
         renderDeviceList();
         const device = deviceRegistry.getActive();
-        if (device) openDeviceModal(device.id);
-      }
+        if (device && tokenRejected) openDeviceModal(device.id);
+      } else showToast(cleanClientText(data.message, 'Agent 错误', 1000));
       break;
 
     case 'pong':
       break;
 
     case 'agent_status':
-      if (!data.online) {
+      if (data.online !== true) {
         // Agent 离线：先等 3 秒，确认不是短暂断连再更新 UI
         if (!agentOfflineDebounce) {
           agentOfflineDebounce = setTimeout(() => {
@@ -931,13 +1074,13 @@ function handleMessage(data) {
         // Agent 上线：取消离线防抖和清理定时器
         cancelAgentOfflineTimers();
         STATE.agentOnline = true;
-        if (data.agentName) STATE.agentName = data.agentName;
+        if (data.agentName) STATE.agentName = cleanClientText(data.agentName, STATE.agentName, 120);
         updateAgentStatus();
       }
       break;
 
     case 'sessions':
-      STATE.sessions = data.sessions || [];
+      STATE.sessions = normalizeSessionList(data.sessions);
       reconcileTerminals();
       if (!STATE.activeId && STATE.sessions.length > 0) restoreActive();
       renderSessionList();
@@ -946,12 +1089,22 @@ function handleMessage(data) {
       syncVisibleSubscriptions();
       break;
 
-    case 'terminal_created':
-      upsertSession({ id: data.sessionId, title: data.title, cwd: data.cwd, pid: data.pid, status: data.status, createdAt: data.createdAt || Date.now() });
+    case 'terminal_created': {
+      const session = normalizeSession({
+        id: data.sessionId,
+        title: data.title,
+        cwd: data.cwd,
+        pid: data.pid,
+        status: data.status,
+        createdAt: data.createdAt,
+      });
+      if (!session) break;
+      upsertSession(session);
       renderSessionList();
       selectSession(data.sessionId);
       if (STATE.splitMode) refreshTileView();
       break;
+    }
 
     case 'terminal_output':
       writeOutput(data.sessionId, data.data, data.seq);
@@ -971,22 +1124,26 @@ function handleMessage(data) {
     }
 
     case 'terminal_exit':
+      if (!validSessionId(data.sessionId)) break;
       markStatus(data.sessionId, 'exited');
-      writeLocalOutput(data.sessionId, `\r\n\x1b[33m[进程退出 code=${data.exitCode}]\x1b[0m\r\n`);
+      writeLocalOutput(data.sessionId, `\r\n\x1b[33m[进程退出 code=${Number.isInteger(data.exitCode) ? data.exitCode : 'unknown'}]\x1b[0m\r\n`);
       break;
 
     case 'terminal_closed':
+      if (!validSessionId(data.sessionId)) break;
       removeSession(data.sessionId);
       if (STATE.splitMode) refreshTileView();
       break;
 
-    case 'terminal_error':
-      if (data.sessionId && terminals.has(data.sessionId)) {
-        writeLocalOutput(data.sessionId, `\r\n\x1b[31m[错误] ${data.message}\x1b[0m\r\n`);
+    case 'terminal_error': {
+      const message = cleanClientText(data.message, '操作失败', 1000);
+      if (validSessionId(data.sessionId) && terminals.has(data.sessionId)) {
+        writeLocalOutput(data.sessionId, `\r\n\x1b[31m[错误] ${message}\x1b[0m\r\n`);
       } else {
-        showToast(data.message || '操作失败');
+        showToast(message);
       }
       break;
+    }
   }
 }
 
@@ -1041,6 +1198,8 @@ function disposeTerminal(sessionId) {
   if (!t) return;
   if (t.subscribed) sendWS({ type: 'terminal_detach', sessionId });
   t.subscribed = false;
+  if (t.fitFrame) cancelAnimationFrame(t.fitFrame);
+  if (t.fitTimer) clearTimeout(t.fitTimer);
   if (t.observer) { t.observer.disconnect(); t.observer = null; }
   t.stream.dispose();
   try { t.term.dispose(); } catch {}
@@ -1134,19 +1293,11 @@ function ensureTerminal(sessionId) {
     return true;
   });
 
-  // ResizeObserver：容器尺寸变化时自动 fit，解决终端不铺满问题
+  // ResizeObserver：容器尺寸变化时自动 fit，解决窗口缩放与分屏切换后不铺满的问题。
   const observer = new ResizeObserver(() => {
     const t = terminals.get(sessionId);
     if (!t || t.container.style.display === 'none') return;
-    try {
-      // 延迟一帧确保布局完成
-      requestAnimationFrame(() => {
-        try {
-          t.fit.fit();
-          sendWS({ type: 'terminal_resize', sessionId, cols: t.term.cols, rows: t.term.rows });
-        } catch {}
-      });
-    } catch {}
+    scheduleFitTerminal(sessionId);
   });
   observer.observe(container);
 
@@ -1156,10 +1307,10 @@ function ensureTerminal(sessionId) {
     onSnapshotApplied: () => {
       const current = terminals.get(sessionId);
       if (!current || current.container.style.display === 'none') return;
-      requestAnimationFrame(() => {
-        fitTerminal(sessionId);
-        scheduleHistoryButtonUpdate(sessionId);
-      });
+      // 快照带有远端 PTY 尺寸，应用时会暂时 resize xterm；随后必须按当前
+      // 窗口重新 fit。后台窗口的 rAF 可能暂停，因此仍使用带定时器兜底的队列。
+      scheduleFitTerminal(sessionId);
+      scheduleHistoryButtonUpdate(sessionId);
     },
   });
   const entry = {
@@ -1170,6 +1321,11 @@ function ensureTerminal(sessionId) {
     container,
     subscribed: false,
     observer,
+    fitFrame: 0,
+    fitTimer: 0,
+    fitFocus: false,
+    lastSentCols: 0,
+    lastSentRows: 0,
     lastActivity: 0,
     historyWarningShown: false,
   };
@@ -1231,6 +1387,8 @@ function requestTerminalResync(sessionId) {
 function markAllTerminalsUnsubscribed() {
   for (const [id, t] of terminals) {
     t.subscribed = false;
+    t.lastSentCols = 0;
+    t.lastSentRows = 0;
     t.stream.beginSync();
   }
 }
@@ -1262,14 +1420,47 @@ function syncVisibleSubscriptions() {
   }
 }
 
-/** 执行终端 fit + resize 通知 */
+/** 执行终端 fit，并且仅在网格尺寸变化时通知 Agent。 */
 function fitTerminal(sessionId) {
   const t = terminals.get(sessionId);
-  if (!t || t.container.style.display === 'none') return;
+  if (!t || t.container.style.display === 'none' || t.container.clientWidth <= 0 || t.container.clientHeight <= 0) return false;
   try {
-    t.fit.fit();
-    sendWS({ type: 'terminal_resize', sessionId, cols: t.term.cols, rows: t.term.rows });
-  } catch {}
+    const proposed = t.fit.proposeDimensions();
+    if (!proposed || !Number.isInteger(proposed.cols) || !Number.isInteger(proposed.rows)) return false;
+    if (t.term.cols !== proposed.cols || t.term.rows !== proposed.rows) t.fit.fit();
+    if (t.subscribed && (t.lastSentCols !== t.term.cols || t.lastSentRows !== t.term.rows) &&
+        sendWS({ type: 'terminal_resize', sessionId, cols: t.term.cols, rows: t.term.rows })) {
+      t.lastSentCols = t.term.cols;
+      t.lastSentRows = t.term.rows;
+    }
+    return true;
+  } catch { return false; }
+}
+
+/** 合并同一帧内的多次布局变化，并在浏览器完成两轮布局后再 fit。 */
+function scheduleFitTerminal(sessionId, focus = false) {
+  const t = terminals.get(sessionId);
+  if (!t) return;
+  t.fitFocus = t.fitFocus || focus;
+  // 已有任务时直接合并；执行时读取最新容器尺寸，避免 ResizeObserver
+  // 高频触发不断取消前一任务，造成终端永远无法完成 fit。
+  if (t.fitFrame || t.fitTimer) return;
+  const run = () => {
+    if (t.fitFrame) cancelAnimationFrame(t.fitFrame);
+    if (t.fitTimer) clearTimeout(t.fitTimer);
+    t.fitFrame = 0;
+    t.fitTimer = 0;
+    const shouldFocus = t.fitFocus;
+    t.fitFocus = false;
+    if (fitTerminal(sessionId) && shouldFocus) t.term.focus();
+  };
+  // 可见窗口优先在两轮布局后执行；后台恢复或 WebView 暂停 rAF 时，
+  // 50ms 定时器保证任务不会永久卡住。
+  t.fitTimer = setTimeout(run, 50);
+  t.fitFrame = requestAnimationFrame(() => {
+    if (!t.fitTimer) return;
+    t.fitFrame = requestAnimationFrame(run);
+  });
 }
 
 // ── 选择 / 切换会话 ────────────────────────────────────────────
@@ -1297,13 +1488,7 @@ function selectSession(sessionId) {
     const entry = ensureTerminal(sessionId);
     entry.container.style.display = 'block';
     syncVisibleSubscriptions();
-    // 双重 rAF 确保 DOM 布局完成后再 fit
-    requestAnimationFrame(() => {
-      requestAnimationFrame(() => {
-        fitTerminal(sessionId);
-        entry.term.focus();
-      });
-    });
+    scheduleFitTerminal(sessionId, true);
   }
 
   renderSessionList();
@@ -1328,9 +1513,10 @@ function toggleSplitView() {
     tileViewBtn.classList.remove('active');
     tileViewBtn.textContent = '📐 分屏';
     terminalsEl.classList.remove('tiled');
+    terminalsEl.style.gridTemplateColumns = '';
     for (const [, t] of terminals) {
       t.container.style.display = 'none';
-      t.container.style.border = '';
+      t.container.classList.remove('active-tile');
     }
     emptyHint.style.display = 'none';
     if (STATE.activeId) {
@@ -1358,8 +1544,8 @@ function refreshTileView() {
 
   let cols = 1;
   if (visibleSessions.length >= 5) cols = 3;
-  else if (visibleSessions.length >= 3) cols = 2;
-  terminalsEl.style.gridTemplateColumns = `repeat(${cols}, 1fr)`;
+  else if (visibleSessions.length >= 2) cols = 2;
+  terminalsEl.style.gridTemplateColumns = `repeat(${cols}, minmax(0, 1fr))`;
 
   for (const s of visibleSessions) {
     ensureTerminal(s.id);
@@ -1368,25 +1554,16 @@ function refreshTileView() {
   for (const [id, t] of terminals) {
     if (visibleSessions.some((s) => s.id === id)) {
       t.container.style.display = 'block';
-      t.container.style.border = id === STATE.activeId
-        ? '1px solid var(--accent)'
-        : '1px solid var(--border)';
+      t.container.classList.toggle('active-tile', id === STATE.activeId);
     } else {
       t.container.style.display = 'none';
-      t.container.style.border = '';
+      t.container.classList.remove('active-tile');
     }
   }
 
   syncVisibleSubscriptions();
 
-  // 延迟 fit 确保 grid 布局完成
-  requestAnimationFrame(() => {
-    requestAnimationFrame(() => {
-      for (const s of visibleSessions) {
-        fitTerminal(s.id);
-      }
-    });
-  });
+  for (const s of visibleSessions) scheduleFitTerminal(s.id);
 }
 
 function restoreActive() {
@@ -1399,7 +1576,10 @@ function restoreActive() {
     localStorage.removeItem(LEGACY_ACTIVE_SESSION_KEY);
     updateActiveHeader();
     renderSessionList();
-    setMobileView('sessions');
+    // 后台重连和重新鉴权只恢复会话数据，不得覆盖用户当前所在页面。
+    // 首次启动时 mobileView 默认为 sessions；主动选择设备时
+    // activateDevice() 已经设置了期望页面，因此这里保留现状即可。
+    setMobileView(mobileView);
   } else if (target) {
     selectSession(target.id);
   } else {
@@ -1407,7 +1587,7 @@ function restoreActive() {
     localStorage.removeItem(activeSessionStorageKey());
     localStorage.removeItem('claude-web-active');
     updateActiveHeader();
-    if (isMobileLayout()) setMobileView('sessions');
+    if (isMobileLayout()) setMobileView(mobileView);
   }
 }
 
@@ -1666,6 +1846,7 @@ function updateAgentStatus() {
     agentLabel.textContent = name + ' 离线';
   }
   newSessionBtn.disabled = !STATE.agentOnline;
+  renderDesktopDeviceRail();
   updateMobileOverview();
 }
 
@@ -1781,10 +1962,10 @@ window.addEventListener('resize', () => {
   }
   if (STATE.splitMode) {
     for (const [id, t] of terminals) {
-      if (t.container.style.display !== 'none') fitTerminal(id);
+      if (t.container.style.display !== 'none') scheduleFitTerminal(id);
     }
   } else {
-    if (STATE.activeId) fitTerminal(STATE.activeId);
+    if (STATE.activeId) scheduleFitTerminal(STATE.activeId);
   }
 });
 window.addEventListener('orientationchange', () => {

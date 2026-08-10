@@ -21,6 +21,7 @@ class FakeSocket {
   constructor() {
     this.readyState = 0;
     this.sent = [];
+    this.bufferedAmount = 0;
   }
   send(data) { this.sent.push(JSON.parse(data)); }
   close() { this.readyState = 2; }
@@ -179,6 +180,48 @@ test('主动断开会使旧连接事件失效且不会偷偷重连', () => {
   assert.equal(client.socket, null);
   assert.equal(disconnects, 0);
   assert.equal(callbacks.length, 0);
+});
+
+test('鉴权前控制消息和错误角色 auth_ok 会触发协议重连', () => {
+  const sockets = [];
+  const errors = [];
+  const callbacks = [];
+  const client = new StrictWebSocketClient({
+    createSocket: () => { const socket = new FakeSocket(); sockets.push(socket); return socket; },
+    getUrl: () => 'ws://test',
+    getToken: () => 'x'.repeat(32),
+    onMessage: () => {},
+    onError: (error) => errors.push(error),
+    setTimer: (fn) => { callbacks.push(fn); return callbacks.length; },
+    clearTimer: () => {},
+  });
+  client.connect();
+  sockets[0].open();
+  sockets[0].message({ type: 'terminal_output', data: 'unsafe' });
+  assert.equal(client.socket, null);
+  assert(errors.some((error) => /before authentication/.test(error.message)));
+
+  callbacks.at(-1)();
+  sockets[1].open();
+  sockets[1].message({ type: 'auth_ok', role: 'agent' });
+  assert.equal(client.socket, null);
+  assert(errors.some((error) => /invalid authentication/.test(error.message)));
+});
+
+test('发送缓冲超限时拒绝继续排队', () => {
+  const socket = new FakeSocket();
+  const client = new StrictWebSocketClient({
+    createSocket: () => socket,
+    getUrl: () => 'ws://test',
+    getToken: () => 'x'.repeat(32),
+    onMessage: () => {},
+    maxBufferedAmount: 64 * 1024,
+  });
+  client.connect();
+  socket.open();
+  client.markAuthenticated();
+  socket.bufferedAmount = 65 * 1024;
+  assert.equal(client.send({ type: 'ping' }), false);
 });
 
 test('xterm 同一时间只接收一个 write，并合并高频连续输出', () => {

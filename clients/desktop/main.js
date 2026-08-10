@@ -1,7 +1,13 @@
 const { app, BrowserWindow, ipcMain, safeStorage, session } = require('electron');
+const crypto = require('node:crypto');
 const fs = require('node:fs');
 const path = require('node:path');
+const { fileURLToPath } = require('node:url');
 let mainWindow = null;
+
+const MAX_CREDENTIAL_FILE_BYTES = 1024 * 1024;
+const MAX_CREDENTIALS = 100;
+const RESERVED_IDS = new Set(['__proto__', 'prototype', 'constructor']);
 
 if (process.env.REMOTE_TERMINAL_SMOKE === '1' && process.env.REMOTE_TERMINAL_SMOKE_USER_DATA) {
   app.setPath('userData', process.env.REMOTE_TERMINAL_SMOKE_USER_DATA);
@@ -19,25 +25,41 @@ function secureStorageAvailable() {
 }
 
 function validCredentialId(value) {
-  return typeof value === 'string' && /^[A-Za-z0-9._:-]{1,128}$/.test(value);
+  return typeof value === 'string' && !RESERVED_IDS.has(value) &&
+    /^[A-Za-z0-9._:-]{1,128}$/.test(value);
+}
+
+function validToken(value) {
+  return typeof value === 'string' && value.length >= 32 && value.length <= 512 &&
+    Buffer.byteLength(value, 'utf8') <= 1024 &&
+    !/change-me|deprecated|your-token|shared-secret/i.test(value);
+}
+
+function sanitizeCredentialMap(value) {
+  const result = Object.create(null);
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return result;
+  for (const [id, token] of Object.entries(value).slice(0, MAX_CREDENTIALS)) {
+    if (validCredentialId(id) && validToken(token)) result[id] = token;
+  }
+  return result;
 }
 
 function readCredentialMap() {
   if (!secureStorageAvailable()) return {};
   try {
+    const stat = fs.lstatSync(credentialPath());
+    if (stat.isSymbolicLink() || !stat.isFile() || stat.size <= 0 || stat.size > MAX_CREDENTIAL_FILE_BYTES) return {};
     const plaintext = safeStorage.decryptString(fs.readFileSync(credentialPath()));
     try {
       const parsed = JSON.parse(plaintext);
-      if (parsed?.version === 2 && parsed.credentials && typeof parsed.credentials === 'object') {
-        return Object.fromEntries(Object.entries(parsed.credentials).filter(
-          ([id, token]) => validCredentialId(id) && typeof token === 'string' && token.length <= 4096,
-        ));
+      if (parsed?.version === 2) {
+        return sanitizeCredentialMap(parsed.credentials);
       }
     } catch {
       // Fall through to the legacy single-token migration below.
     }
     // 0.2.x stored one encrypted token. It may itself happen to be valid JSON.
-    return plaintext.length <= 4096 ? { legacy: plaintext } : {};
+    return validToken(plaintext) ? { legacy: plaintext } : {};
   } catch { return {}; }
 }
 
@@ -45,10 +67,30 @@ function writeCredentialMap(credentials) {
   if (!secureStorageAvailable()) return false;
   const target = credentialPath();
   fs.mkdirSync(path.dirname(target), { recursive: true, mode: 0o700 });
-  const payload = JSON.stringify({ version: 2, credentials });
-  fs.writeFileSync(target, safeStorage.encryptString(payload), { mode: 0o600 });
-  try { fs.chmodSync(target, 0o600); } catch {}
-  return true;
+  try { fs.chmodSync(path.dirname(target), 0o700); } catch {}
+  const normalized = sanitizeCredentialMap(credentials);
+  const payload = JSON.stringify({ version: 2, credentials: normalized });
+  const encrypted = safeStorage.encryptString(payload);
+  if (encrypted.byteLength > MAX_CREDENTIAL_FILE_BYTES) return false;
+  const temporary = `${target}.${process.pid}.${crypto.randomBytes(6).toString('hex')}.tmp`;
+  let fd;
+  try {
+    fd = fs.openSync(temporary, 'wx', 0o600);
+    fs.writeFileSync(fd, encrypted);
+    fs.fsyncSync(fd);
+    fs.closeSync(fd);
+    fd = undefined;
+    fs.renameSync(temporary, target);
+    try { fs.chmodSync(target, 0o600); } catch {}
+    return true;
+  } catch (error) {
+    if (fd !== undefined) {
+      try { fs.closeSync(fd); } catch {}
+    }
+    try { fs.unlinkSync(temporary); } catch {}
+    console.warn('Unable to persist credentials:', error.message);
+    return false;
+  }
 }
 
 function readCredential() {
@@ -61,7 +103,7 @@ function readDeviceCredential(deviceId) {
 }
 
 function writeDeviceCredential(deviceId, token) {
-  if (!validCredentialId(deviceId) || typeof token !== 'string' || token.length > 4096) return false;
+  if (!validCredentialId(deviceId) || !validToken(token)) return false;
   const credentials = readCredentialMap();
   credentials[deviceId] = token;
   delete credentials.legacy;
@@ -69,33 +111,59 @@ function writeDeviceCredential(deviceId, token) {
 }
 
 function clearDeviceCredential(deviceId) {
-  if (!validCredentialId(deviceId)) return;
+  if (!validCredentialId(deviceId)) return false;
   const credentials = readCredentialMap();
   delete credentials[deviceId];
-  if (Object.keys(credentials).length === 0) clearCredential();
-  else writeCredentialMap(credentials);
+  if (Object.keys(credentials).length === 0) return clearCredential();
+  return writeCredentialMap(credentials);
 }
 
 function clearCredential() {
-  try { fs.unlinkSync(credentialPath()); } catch (error) {
+  try {
+    fs.unlinkSync(credentialPath());
+    return true;
+  } catch (error) {
     if (error.code !== 'ENOENT') console.warn('Unable to clear credential:', error.message);
+    return error.code === 'ENOENT';
   }
 }
 
+function uiEntryPath() {
+  return path.join(__dirname, 'ui', 'www', 'index.html');
+}
+
+function trustedIpcEvent(event) {
+  if (!mainWindow || event.sender !== mainWindow.webContents ||
+      !event.senderFrame || event.senderFrame !== event.sender.mainFrame) return false;
+  try {
+    const url = new URL(event.senderFrame.url);
+    return url.protocol === 'file:' && path.resolve(fileURLToPath(url)) === path.resolve(uiEntryPath());
+  } catch {
+    return false;
+  }
+}
+
+function reply(event, fallback, action) {
+  if (!trustedIpcEvent(event)) {
+    event.returnValue = fallback;
+    return;
+  }
+  try { event.returnValue = action(); } catch { event.returnValue = fallback; }
+}
+
 function registerCredentialIpc() {
-  ipcMain.on('remote-terminal:credential-supported', (event) => { event.returnValue = secureStorageAvailable(); });
-  ipcMain.on('remote-terminal:credential-read', (event) => { event.returnValue = readCredential(); });
+  ipcMain.on('remote-terminal:credential-supported', (event) => reply(event, false, secureStorageAvailable));
+  ipcMain.on('remote-terminal:credential-read', (event) => reply(event, '', readCredential));
   ipcMain.on('remote-terminal:device-credential-read', (event, deviceId) => {
-    event.returnValue = readDeviceCredential(deviceId);
+    reply(event, '', () => readDeviceCredential(deviceId));
   });
   ipcMain.on('remote-terminal:device-credential-write', (event, deviceId, token) => {
-    event.returnValue = writeDeviceCredential(deviceId, token);
+    reply(event, false, () => writeDeviceCredential(deviceId, token));
   });
   ipcMain.on('remote-terminal:device-credential-clear', (event, deviceId) => {
-    clearDeviceCredential(deviceId);
-    event.returnValue = true;
+    reply(event, false, () => clearDeviceCredential(deviceId));
   });
-  ipcMain.on('remote-terminal:app-version', (event) => { event.returnValue = app.getVersion(); });
+  ipcMain.on('remote-terminal:app-version', (event) => reply(event, '', () => app.getVersion()));
 }
 
 function createWindow() {
@@ -111,12 +179,16 @@ function createWindow() {
       webSecurity: true,
       spellcheck: false,
       devTools: !app.isPackaged,
+      navigateOnDragDrop: false,
+      webviewTag: false,
+      allowRunningInsecureContent: false,
     }
   });
   mainWindow = win;
   win.setMenuBarVisibility(false);
   win.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
   win.webContents.on('will-navigate', (event) => event.preventDefault());
+  win.webContents.on('will-redirect', (event) => event.preventDefault());
   win.webContents.on('will-attach-webview', (event) => event.preventDefault());
   win.once('ready-to-show', () => win.show());
   win.on('closed', () => { if (mainWindow === win) mainWindow = null; });
@@ -156,7 +228,7 @@ function createWindow() {
       }
     });
   }
-  win.loadFile(path.join(__dirname, 'ui', 'www', 'index.html'));
+  win.loadFile(uiEntryPath());
 }
 
 if (!app.requestSingleInstanceLock()) {
@@ -172,6 +244,8 @@ if (!app.requestSingleInstanceLock()) {
     app.setName('Remote Terminal');
     registerCredentialIpc();
     session.defaultSession.setPermissionRequestHandler((_webContents, _permission, callback) => callback(false));
+    session.defaultSession.setPermissionCheckHandler(() => false);
+    session.defaultSession.on('will-download', (event) => event.preventDefault());
     session.defaultSession.webRequest.onBeforeRequest(
       { urls: ['http://*/*', 'https://*/*'] },
       (_details, callback) => callback({ cancel: true }),

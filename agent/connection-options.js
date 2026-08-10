@@ -4,28 +4,11 @@ const fs = require('fs');
 
 function buildServerUrl(config, env = process.env) {
   const configured = env.CW_SERVER_URL || config.serverUrl;
-  let value;
-
-  if (configured) {
-    value = configured;
-  } else {
-    const useWSS = config.useTLS === true || env.CW_USE_WSS === 'true';
-    const port = Number(config.serverPort || (useWSS ? 443 : 3002));
-    if (!config.serverHost || typeof config.serverHost !== 'string') {
-      throw new Error('serverHost must be configured when serverUrl is not set');
-    }
-    if (/your-server|example\.com/i.test(config.serverHost)) {
-      throw new Error('serverHost must not use an example value');
-    }
-    if (!Number.isInteger(port) || port <= 0 || port > 65535) {
-      throw new Error('serverPort must be between 1 and 65535');
-    }
-    value = `${useWSS ? 'wss' : 'ws'}://${config.serverHost}:${port}`;
-  }
+  if (!configured || typeof configured !== 'string') throw new Error('serverUrl must be configured');
 
   let url;
   try {
-    url = new URL(value);
+    url = new URL(configured);
   } catch {
     throw new Error('serverUrl is not a valid URL');
   }
@@ -35,9 +18,12 @@ function buildServerUrl(config, env = process.env) {
   if (/example\.com$/i.test(url.hostname)) {
     throw new Error('serverUrl must not use an example hostname');
   }
-  if (url.username || url.password || url.hash) {
-    throw new Error('serverUrl must not contain credentials or a fragment');
+  if (url.username || url.password || url.search || url.hash) {
+    throw new Error('serverUrl must not contain credentials, a query, or a fragment');
   }
+  const hostname = url.hostname.toLowerCase().replace(/^\[|\]$/g, '');
+  const loopback = hostname === 'localhost' || hostname === '::1' || /^127(?:\.\d{1,3}){3}$/.test(hostname);
+  if (url.protocol === 'ws:' && !loopback) throw new Error('remote serverUrl must use wss://');
   return url;
 }
 
@@ -95,6 +81,7 @@ function getProxyUrl(serverUrl, config, env = process.env) {
   if (!['http:', 'https:'].includes(proxyUrl.protocol)) {
     throw new Error('proxyUrl must use http:// or https://');
   }
+  if (proxyUrl.hash) throw new Error('proxyUrl must not contain a fragment');
   return proxyUrl;
 }
 
@@ -104,8 +91,8 @@ function loadProxyAgentClass() {
 }
 
 function createConnectionOptions(serverUrl, config, env = process.env) {
-  const connectTimeout = Number(env.CW_CONNECT_TIMEOUT_MS);
-  const maxPayload = Number(env.CW_AGENT_MAX_PAYLOAD_BYTES);
+  const connectTimeout = Number(env.CW_CONNECT_TIMEOUT_MS || config.connectTimeoutMs);
+  const maxPayload = Number(env.CW_AGENT_MAX_PAYLOAD_BYTES || config.maxPayloadBytes);
   const options = {
     handshakeTimeout: Number.isInteger(connectTimeout) && connectTimeout >= 1000 && connectTimeout <= 120000
       ? connectTimeout
@@ -113,11 +100,17 @@ function createConnectionOptions(serverUrl, config, env = process.env) {
     maxPayload: Number.isInteger(maxPayload) && maxPayload >= 64 * 1024 && maxPayload <= 8 * 1024 * 1024
       ? maxPayload
       : 1024 * 1024,
+    perMessageDeflate: false,
+    followRedirects: false,
   };
 
   if (config.tlsCaPath) {
     if (serverUrl.protocol !== 'wss:') {
       throw new Error('tlsCaPath can only be used with wss://');
+    }
+    const stat = fs.statSync(config.tlsCaPath);
+    if (!stat.isFile() || stat.size <= 0 || stat.size > 1024 * 1024) {
+      throw new Error('tlsCaPath must be a regular CA file no larger than 1 MiB');
     }
     options.ca = fs.readFileSync(config.tlsCaPath);
   }

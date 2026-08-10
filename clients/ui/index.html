@@ -7,28 +7,40 @@
   <meta http-equiv="Content-Security-Policy" content="default-src 'self' file:; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src ws: wss:; object-src 'none'; frame-src 'none'; base-uri 'none'">
   <title>Remote Terminal</title>
   <link rel="stylesheet" href="./vendor/xterm.css">
-  <link rel="stylesheet" href="./style.css?v=20260809b">
+  <link rel="stylesheet" href="./style.css?v=20260809d">
 </head>
 <body>
   <!-- ── 主界面 ────────────────────────────────────────────── -->
   <div id="main-screen" class="screen" data-mobile-view="sessions" data-desktop-view="terminal">
+    <!-- 桌面端设备轨：快速切换设备，底部进入管理与设置 -->
+    <aside id="desktop-device-rail" class="desktop-only" aria-label="设备导航">
+      <div class="device-rail-brand" title="Remote Terminal" aria-label="Remote Terminal">&gt;_</div>
+      <div class="device-rail-heading">设备</div>
+      <div id="desktop-device-list" class="device-rail-list" role="list"></div>
+      <button id="desktop-rail-add-device" class="rail-icon-button device-rail-add" type="button" title="添加设备" aria-label="添加设备">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>
+      </button>
+      <div class="device-rail-footer">
+        <button id="desktop-devices-btn" class="rail-icon-button" type="button" title="管理设备" aria-label="管理设备">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="4" y="5" width="16" height="11" rx="2"/><path d="M9 20h6m-3-4v4"/></svg>
+        </button>
+        <button id="settings-btn" class="rail-icon-button" type="button" title="客户端设置" aria-label="客户端设置">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 8.5A3.5 3.5 0 1 0 12 15a3.5 3.5 0 0 0 0-7Zm8.3 4.9-1.7 1 .1 2-2.7 1.6-1.8-.9-1.7 1.1-.1 2H9.3l-.1-2-1.7-1.1-1.8.9L3 16.4l.1-2-1.7-1v-2.8l1.7-1-.1-2L5.7 6l1.8.9 1.7-1.1.1-2h3.1l.1 2 1.7 1.1L16 6l2.7 1.6-.1 2 1.7 1v2.8Z"/></svg>
+        </button>
+      </div>
+    </aside>
+
     <!-- 侧栏：会话列表 -->
     <aside id="sidebar">
       <div class="sidebar-header">
         <div class="brand-wrap">
-          <span class="brand desktop-brand"><span class="brand-mark">&gt;_</span> Remote Terminal</span>
+          <span class="brand desktop-brand"><strong>终端会话</strong><small id="desktop-active-device-name">未选择设备</small></span>
           <div class="mobile-brand mobile-only">
             <h1>终端</h1>
             <span id="mobile-session-count">0 个会话</span>
           </div>
         </div>
         <div class="sidebar-actions">
-          <button id="desktop-devices-btn" class="desktop-only icon-button" title="设备管理" aria-label="设备管理">
-            <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="4" y="5" width="16" height="11" rx="2"/><path d="M9 20h6m-3-4v4"/></svg>
-          </button>
-          <button id="settings-btn" class="desktop-only icon-button" title="客户端设置" aria-label="客户端设置">
-            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 8.5A3.5 3.5 0 1 0 12 15a3.5 3.5 0 0 0 0-7Zm8.3 4.9-1.7 1 .1 2-2.7 1.6-1.8-.9-1.7 1.1-.1 2H9.3l-.1-2-1.7-1.1-1.8.9L3 16.4l.1-2-1.7-1v-2.8l1.7-1-.1-2L5.7 6l1.8.9 1.7-1.1.1-2h3.1l.1 2 1.7 1.1L16 6l2.7 1.6-.1 2 1.7 1v2.8Z"/></svg>
-          </button>
           <button id="new-session-btn" class="icon-button primary-icon" title="新建会话" aria-label="新建会话">
             <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>
           </button>
@@ -133,7 +145,7 @@
         <div class="mobile-list-group profile-actions">
           <button id="mobile-open-settings" class="mobile-list-button" type="button"><span class="row-icon settings-icon">Aa</span><span>显示与终端设置</span><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m9 6 6 6-6 6"/></svg></button>
           <button id="mobile-open-connection" class="mobile-list-button" type="button"><span class="row-icon security-icon">✓</span><span>设备与凭据</span><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m9 6 6 6-6 6"/></svg></button>
-          <div class="mobile-info-row"><span>客户端版本</span><small id="mobile-client-version">0.3.0</small></div>
+          <div class="mobile-info-row"><span>客户端版本</span><small id="mobile-client-version">0.3.3</small></div>
         </div>
         <button id="mobile-logout-btn" class="mobile-logout-button" type="button">断开当前设备</button>
       </div>
@@ -198,7 +210,7 @@
       <input id="device-edit-id" type="hidden">
       <label class="form-field"><span>设备名称</span><input id="device-name-input" type="text" maxlength="80" placeholder="例如：生产服务器" autocomplete="off" required></label>
       <label class="form-field"><span>中转域名或地址</span><input id="device-relay-input" type="text" maxlength="2048" inputmode="url" placeholder="webclaude.xmu-zss.cn" autocomplete="url" required><small>默认使用安全的 WSS；也可填写完整的 wss:// 地址。</small></label>
-      <label class="form-field"><span>访问 Token</span><input id="device-token-input" type="password" maxlength="4096" placeholder="输入该设备的浏览器 Token" autocomplete="new-password"><small id="device-token-hint">Token 仅写入系统安全凭据存储，不进入普通配置。</small></label>
+      <label class="form-field"><span>访问 Token</span><input id="device-token-input" type="password" minlength="32" maxlength="512" placeholder="输入该设备的浏览器 Token" autocomplete="new-password"><small id="device-token-hint">Token 仅写入系统安全凭据存储，不进入普通配置。</small></label>
       <p id="device-form-error" class="error-msg hidden"></p>
       <div class="modal-actions"><button id="device-modal-cancel" class="ghost" type="button">取消</button><button id="device-save-btn" class="primary" type="submit">保存并连接</button></div>
     </form>
@@ -239,9 +251,9 @@
   <script src="./vendor/addon-fit.js"></script>
   <script src="./vendor/addon-unicode11.js"></script>
   <script src="./strict-websocket.js?v=20260809b"></script>
-  <script src="./terminal-stream.js?v=20260804a"></script>
+  <script src="./terminal-stream.js?v=20260809b"></script>
   <script src="./client-settings.js?v=20260809b"></script>
   <script src="./device-store.js?v=20260809a"></script>
-  <script src="./app.js?v=20260809b"></script>
+  <script src="./app.js?v=20260809e"></script>
 </body>
 </html>

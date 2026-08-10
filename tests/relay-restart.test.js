@@ -14,22 +14,32 @@ const browserToken = crypto.randomBytes(32).toString('base64url');
 const agentToken = crypto.randomBytes(32).toString('base64url');
 const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'remote-terminal-restart-'));
 const workspaceRoot = path.join(tempRoot, 'workspace');
-const configPath = path.join(tempRoot, 'config.json');
+const serverConfigPath = path.join(tempRoot, 'server.json');
+const agentConfigPath = path.join(tempRoot, 'agent.json');
 const target = `ws://127.0.0.1:${port}`;
+const currentUser = os.userInfo();
 
-fs.writeFileSync(configPath, JSON.stringify({
+fs.mkdirSync(workspaceRoot, { mode: 0o700 });
+
+fs.writeFileSync(serverConfigPath, JSON.stringify({
   port,
   bindHost: '127.0.0.1',
+  useTLS: false,
   devices: {
     'restart-agent': { name: 'restart-agent', browserToken, agentToken },
   },
+  maxSessions: 2,
+}, null, 2), { mode: 0o600 });
+fs.writeFileSync(agentConfigPath, JSON.stringify({
   serverUrl: target,
   agentToken,
-  workspaceRoot,
+  requiredUser: currentUser.username,
+  requiredUid: typeof process.getuid === 'function' ? process.getuid() : currentUser.uid,
+  requiredHome: currentUser.homedir,
+  requiredWorkingDirectory: workspaceRoot,
   maxSessions: 2,
   offlineOutputBytes: 128 * 1024,
-  auditLogPath: path.join(workspaceRoot, '.audit.log'),
-}, null, 2));
+}, null, 2), { mode: 0o600 });
 
 let serverProc = null;
 let agentProc = null;
@@ -79,14 +89,13 @@ function waitForHealth(timeoutMs = 8000) {
   });
 }
 
-function spawnProcess(entry) {
-  const proc = spawn(process.execPath, [entry], {
-    cwd: root,
+function spawnProcess(entry, configPath, cwd = root) {
+  const proc = spawn(process.execPath, [path.join(root, entry)], {
+    cwd,
     env: {
       ...process.env,
+      NODE_ENV: 'production',
       CW_CONFIG_PATH: configPath,
-      CW_HEARTBEAT_MS: '500',
-      CW_PONG_TIMEOUT_MS: '2500',
     },
     stdio: ['ignore', 'pipe', 'pipe'],
   });
@@ -96,7 +105,7 @@ function spawnProcess(entry) {
 }
 
 async function startServer() {
-  serverProc = spawnProcess('server/index.js');
+  serverProc = spawnProcess('server/index.js', serverConfigPath);
   await waitForHealth();
 }
 
@@ -179,7 +188,7 @@ async function cleanup() {
   console.log('╚══════════════════════════════════════════╝');
 
   await startServer();
-  agentProc = spawnProcess('agent/index.js');
+  agentProc = spawnProcess('agent/index.js', agentConfigPath, workspaceRoot);
 
   const first = await connectBrowser();
   if (!first.auth.agentOnline) {

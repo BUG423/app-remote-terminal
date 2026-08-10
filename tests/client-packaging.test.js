@@ -30,6 +30,11 @@ try {
   assert(html.includes('id="mobile-tabbar"'));
   assert(html.includes('id="mobile-command-form"'));
   assert(html.includes('id="device-page"'));
+  assert(html.includes('id="desktop-device-rail"'));
+  assert(html.includes('id="desktop-device-list"'));
+  assert(html.includes('id="desktop-active-device-name"'));
+  assert(html.indexOf('id="desktop-device-rail"') < html.indexOf('id="sidebar"'));
+  assert(html.indexOf('id="sidebar"') < html.indexOf('id="workspace"'));
   assert(html.includes('id="device-search-input"'));
   assert(html.includes('id="session-rename-modal"'));
   assert(html.includes('id="history-bottom-btn"'));
@@ -40,12 +45,15 @@ try {
   assert(!html.includes('href="/'));
 
   const desktopMain = fs.readFileSync(path.join(root, 'clients/desktop/main.js'), 'utf8');
-  assert(desktopMain.includes("win.loadFile(path.join(__dirname, 'ui', 'www', 'index.html'))"));
+  assert(desktopMain.includes('win.loadFile(uiEntryPath())'));
   assert(!desktopMain.includes('win.loadURL('));
   assert(desktopMain.includes('safeStorage.encryptString(payload)'));
   assert(desktopMain.includes("safeStorage.getSelectedStorageBackend() !== 'basic_text'"));
   assert(desktopMain.includes('remote-terminal:device-credential-read'));
-  assert(desktopMain.includes("mode: 0o600"));
+  assert(desktopMain.includes("fs.openSync(temporary, 'wx', 0o600)"));
+  assert(desktopMain.includes('trustedIpcEvent'));
+  assert(desktopMain.includes('setPermissionCheckHandler'));
+  assert(desktopMain.includes("session.defaultSession.on('will-download'"));
 
   const androidMain = fs.readFileSync(
     path.join(root, 'clients/android/app/src/main/java/cn/remoteterminal/app/MainActivity.kt'),
@@ -67,6 +75,9 @@ try {
   assert(androidMain.includes('WindowInsets.CONSUMED'));
   assert(androidMain.includes('onRenderProcessGone'));
   assert(androidMain.includes('RemoteTerminalApp.onResume()'));
+  assert(androidMain.includes('settings.allowUniversalAccessFromFileURLs = false'));
+  assert(androidMain.includes('settings.safeBrowsingEnabled = true'));
+  assert(!androidMain.includes('webView.saveState'));
 
   const manifest = fs.readFileSync(
     path.join(root, 'clients/android/app/src/main/AndroidManifest.xml'),
@@ -76,7 +87,8 @@ try {
 
   const clientApp = fs.readFileSync(path.join(root, 'clients/ui/app.js'), 'utf8');
   assert(clientApp.includes('remote-terminal-relay-url'));
-  assert(clientApp.includes("location.protocol === 'file:'"));
+  assert(!clientApp.includes('location.host'));
+  assert(!clientApp.includes('isPackagedClient'));
   assert(clientApp.includes("setMobileView('terminal')"));
   assert(clientApp.includes('mobileCommandForm'));
   assert(clientApp.includes('handleMobileBack'));
@@ -84,7 +96,11 @@ try {
   assert(clientApp.includes("classList.toggle('keyboard-open'"));
   assert(clientApp.includes('new DeviceStore.DeviceRegistry(localStorage)'));
   assert(clientApp.includes('deviceRegistry.setSessionAlias'));
+  assert(clientApp.includes('renderDesktopDeviceRail'));
+  assert(clientApp.includes("$('desktop-rail-add-device')"));
   assert(clientApp.includes('term.onScroll'));
+  assert(clientApp.includes('MAX_TERMINAL_INPUT_BYTES'));
+  assert(clientApp.includes('requireValidBrowserToken'));
   assert(!clientApp.includes("loginForm.addEventListener('submit'"));
 
   console.log('✅ Android 与桌面客户端使用本地 UI，并仅通过可配置 WSS 中转');

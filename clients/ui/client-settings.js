@@ -26,7 +26,9 @@
   function sanitize(input) {
     const value = input && typeof input === 'object' ? input : {};
     const pinned = Array.isArray(value.pinnedSessionIds)
-      ? [...new Set(value.pinnedSessionIds.filter((id) => typeof id === 'string' && id.length <= 300))].slice(0, 100)
+      ? [...new Set(value.pinnedSessionIds.filter((id) =>
+          typeof id === 'string' && /^[A-Za-z0-9._:-]{1,257}$/.test(id)
+        ))].slice(0, 100)
       : [];
     return {
       version: 1,

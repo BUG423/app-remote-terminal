@@ -1,6 +1,6 @@
 {
   "name": "remote-terminal-desktop",
-  "version": "0.3.0",
+  "version": "0.3.3",
   "private": true,
   "author": "Remote Terminal",
   "desktopName": "Remote Terminal",
@@ -10,6 +10,9 @@
     "prepare:ui": "node ../prepare-client-ui.js ./ui",
     "start": "npm run prepare:ui && electron .",
     "smoke": "npm run prepare:ui && node scripts/smoke.js",
+    "visual:desktop": "npm run prepare:ui && electron scripts/desktop-visual.js",
+    "visual:mobile": "npm run prepare:ui && electron scripts/mobile-visual.js",
+    "latency:ui": "npm run prepare:ui && electron scripts/live-latency.js",
     "dist": "npm run prepare:ui && electron-builder",
     "dist:win": "npm run prepare:ui && electron-builder --win nsis --x64",
     "dist:win:cross": "npm run prepare:ui && electron-builder --win nsis --x64 -c.win.signAndEditExecutable=false",
@@ -17,8 +20,11 @@
     "dist:mac": "npm run prepare:ui && electron-builder --mac dmg"
   },
   "devDependencies": {
-    "electron": "^36.0.0",
-    "electron-builder": "^26.0.12"
+    "electron": "43.3.0",
+    "electron-builder": "26.15.3"
+  },
+  "engines": {
+    "node": ">=22.12 <25"
   },
   "build": {
     "appId": "cn.remoteterminal.desktop",

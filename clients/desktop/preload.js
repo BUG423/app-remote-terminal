@@ -1,7 +1,6 @@
 const { clipboard, contextBridge, ipcRenderer } = require('electron');
 
 contextBridge.exposeInMainWorld('remoteTerminalConfig', Object.freeze({
-  isPackagedClient: true,
   appVersion: ipcRenderer.sendSync('remote-terminal:app-version') || '',
   defaultRelayUrl: process.env.REMOTE_TERMINAL_URL || 'wss://webclaude.xmu-zss.cn',
   readClipboardText: () => clipboard.readText(),

@@ -53,6 +53,11 @@ SERVER_SERVICE="$4"
 command -v node >/dev/null || { echo "ERROR: node is not installed" >&2; exit 1; }
 command -v npm >/dev/null || { echo "ERROR: npm is not installed" >&2; exit 1; }
 command -v curl >/dev/null || { echo "ERROR: curl is not installed" >&2; exit 1; }
+command -v systemctl >/dev/null || { echo "ERROR: systemd is required" >&2; exit 1; }
+systemctl cat "${SERVER_SERVICE}" >/dev/null 2>&1 || {
+  echo "ERROR: ${SERVER_SERVICE} is not installed" >&2
+  exit 1
+}
 
 cd "${REMOTE_DIR}"
 CURRENT_BRANCH="$(git symbolic-ref --quiet --short HEAD || true)"
@@ -71,25 +76,11 @@ git merge --ff-only "origin/${DEPLOY_BRANCH}"
 cd server
 npm ci --omit=dev --no-audit --no-fund
 
-if command -v systemctl >/dev/null && systemctl cat "${SERVER_SERVICE}" >/dev/null 2>&1; then
-  systemctl restart "${SERVER_SERVICE}"
-  systemctl is-active --quiet "${SERVER_SERVICE}" || {
-    systemctl status "${SERVER_SERVICE}" --no-pager >&2 || true
-    exit 1
-  }
-else
-  command -v pm2 >/dev/null || {
-    echo "ERROR: neither ${SERVER_SERVICE} nor pm2 is available" >&2
-    exit 1
-  }
-  if pm2 describe remote-terminal-server >/dev/null 2>&1; then
-    CW_CONFIG_PATH="${REMOTE_CONFIG_PATH}" pm2 reload remote-terminal-server --update-env
-  else
-    CW_CONFIG_PATH="${REMOTE_CONFIG_PATH}" pm2 start index.js \
-      --name remote-terminal-server --cwd "${REMOTE_DIR}/server"
-  fi
-  pm2 save
-fi
+systemctl restart "${SERVER_SERVICE}"
+systemctl is-active --quiet "${SERVER_SERVICE}" || {
+  systemctl status "${SERVER_SERVICE}" --no-pager >&2 || true
+  exit 1
+}
 
 PORT="$(node -e "const c=require(process.argv[1]); process.stdout.write(String(c.port || 3002))" "${REMOTE_CONFIG_PATH}")"
 BIND_HOST="$(node -e "const c=require(process.argv[1]); process.stdout.write(String(c.bindHost || '127.0.0.1'))" "${REMOTE_CONFIG_PATH}")"

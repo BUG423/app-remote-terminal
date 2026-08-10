@@ -5,3 +5,6 @@ config.json
 .claude/
 .tools/
 REMOTE_SETUP.md
+# 本地设计参考图可能包含账号或凭据，不进入版本库。
+/docs/images/*.png
+!/docs/images/screenshot.png

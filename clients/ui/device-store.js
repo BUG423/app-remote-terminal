@@ -8,14 +8,18 @@
   const STORAGE_KEY = 'remote-terminal-devices-v1';
   const MAX_DEVICES = 100;
   const MAX_ALIASES_PER_DEVICE = 500;
+  const RESERVED_IDS = new Set(['__proto__', 'prototype', 'constructor']);
 
   function cleanText(value, fallback, maxLength) {
-    const text = typeof value === 'string' ? value.trim() : '';
+    const text = typeof value === 'string'
+      ? value.replace(/[\x00-\x1F\x7F-\x9F]/g, ' ').replace(/\s+/g, ' ').trim()
+      : '';
     return (text || fallback).slice(0, maxLength);
   }
 
   function validId(value) {
-    return typeof value === 'string' && /^[A-Za-z0-9._:-]{1,128}$/.test(value);
+    return typeof value === 'string' && !RESERVED_IDS.has(value) &&
+      /^[A-Za-z0-9._:-]{1,128}$/.test(value);
   }
 
   function sanitizeDevice(value) {
@@ -189,7 +193,11 @@
     }
 
     getSessionAlias(deviceId, sessionId) {
-      return this.state.sessionAliases[deviceId]?.[sessionId] || '';
+      if (!validId(deviceId) || !validId(sessionId)) return '';
+      const aliases = this.state.sessionAliases[deviceId];
+      return aliases && Object.prototype.hasOwnProperty.call(aliases, sessionId)
+        ? aliases[sessionId]
+        : '';
     }
   }
 

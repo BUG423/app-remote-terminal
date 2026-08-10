@@ -138,7 +138,10 @@
         } catch { /* a later resync can recover rendering */ }
       }
 
+      let completed = false;
       const done = () => {
+        if (completed) return;
+        completed = true;
         this.writing = false;
         if (item.kind === 'snapshot' && item.revision === this.revision && !this.disposed) {
           this.onSnapshotApplied();
@@ -147,6 +150,10 @@
       };
       try {
         this.terminal.write(item.data, done);
+        // xterm may skip the callback for an empty write. Snapshots can be
+        // legitimately empty, so complete them on the next microtask as a
+        // fallback; `done` is idempotent if xterm did invoke it.
+        if (item.data.length === 0) queueMicrotask(done);
       } catch {
         this.writing = false;
         this._requestResync();

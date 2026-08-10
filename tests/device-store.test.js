@@ -51,11 +51,15 @@ const repaired = sanitizeState({
     { id: 'safe', name: '', relayUrl: 'wss://safe.example.cn' },
     { id: 'safe', name: 'duplicate', relayUrl: 'wss://duplicate.example.cn' },
     { id: '../bad', name: 'bad', relayUrl: 'wss://bad.example.cn' },
+    { id: '__proto__', name: 'prototype', relayUrl: 'wss://bad.example.cn' },
   ],
   sessionAliases: { safe: { good: '别名', '../bad': '忽略' } },
 });
 assert.equal(repaired.activeDeviceId, 'safe');
 assert.equal(repaired.devices.length, 1);
 assert.deepEqual(repaired.sessionAliases.safe, { good: '别名' });
+assert.throws(() => registry.add({ id: 'constructor', name: 'bad', relayUrl: 'wss://bad.example.cn' }), /不完整/);
+registry.update('device-a', { name: '安全\n设备' });
+assert.equal(registry.get('device-a').name, '安全 设备');
 
 console.log('✅ 多设备增删改查、搜索、选择、会话别名和损坏数据恢复通过');

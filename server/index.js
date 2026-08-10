@@ -14,12 +14,14 @@
 
 const http = require('http');
 const https = require('https');
+const net = require('net');
 const path = require('path');
 const fs = require('fs');
 const { WebSocketServer } = require('ws');
 const { createAuthMiddleware } = require('./auth');
 const rateLimiter = require('./rate-limiter');
 const { TerminalState } = require('./terminal-state');
+const { loadConfig } = require('../lib/load-config');
 
 // 为所有 console 输出添加时间戳，方便排查时序问题
 const origLog = console.log;
@@ -34,27 +36,12 @@ console.error = (...args) => origError(`[${ts()}]`, ...args);
 const CONFIG_PATH = process.env.CW_CONFIG_PATH || path.join(__dirname, '..', 'config.json');
 let config;
 try {
-  config = JSON.parse(fs.readFileSync(CONFIG_PATH, 'utf-8'));
+  config = loadConfig(CONFIG_PATH, { label: 'Relay configuration' });
 } catch (err) {
-  console.error('❌ 加载 config.json 失败，请复制 config.json.example 为 config.json 并编辑。');
+  console.error('❌ Relay 配置加载失败，请根据 config.json.example 创建受限权限配置。');
   console.error(err.message);
   process.exit(1);
 }
-
-// 极简 .env 加载
-(function loadDotEnv() {
-  try {
-    const envPath = path.join(__dirname, '..', '.env');
-    const raw = fs.readFileSync(envPath, 'utf-8');
-    for (const line of raw.split('\n')) {
-      const m = line.match(/^\s*([\w.]+)\s*=\s*(.*)\s*$/);
-      if (m && !process.env[m[1]]) process.env[m[1]] = m[2].replace(/^["']|["']$/g, '');
-    }
-  } catch { /* 无 .env 文件则忽略 */ }
-})();
-
-// token 可从环境变量覆盖（仅兼容旧单 token 模式）
-config.token = process.env.CLAUDE_WEB_TOKEN || config.token;
 
 function positiveInt(value, fallback, min, max) {
   const parsed = Number(value);
@@ -63,21 +50,44 @@ function positiveInt(value, fallback, min, max) {
 
 const PORT = positiveInt(process.env.CW_PORT || config.port, 3002, 1, 65535);
 const BIND_HOST = config.bindHost || '127.0.0.1';
+if (typeof BIND_HOST !== 'string' || (net.isIP(BIND_HOST) === 0 && BIND_HOST !== 'localhost')) {
+  console.error('❌ bindHost 必须是明确的 IP 地址或 localhost');
+  process.exit(1);
+}
 const USE_TLS = config.useTLS === true;
-const ENABLE_HTTP_REDIRECT = USE_TLS && config.enableHttpRedirect === true;
 const TLS_OPTIONS = USE_TLS ? (() => {
   try {
-    const cert = fs.readFileSync(config.tlsCertPath, 'utf-8');
-    const key = fs.readFileSync(config.tlsKeyPath, 'utf-8');
+    const readTlsFile = (filePath, label) => {
+      if (typeof filePath !== 'string' || !path.isAbsolute(filePath)) {
+        throw new Error(`${label} path must be absolute`);
+      }
+      const stat = fs.lstatSync(filePath);
+      if (stat.isSymbolicLink() || !stat.isFile() || stat.size <= 0 || stat.size > 2 * 1024 * 1024) {
+        throw new Error(`${label} must be a regular file no larger than 2 MiB`);
+      }
+      if (process.platform !== 'win32' && (stat.mode & 0o022) !== 0) {
+        throw new Error(`${label} must not be group- or world-writable`);
+      }
+      return fs.readFileSync(filePath, 'utf8');
+    };
+    const cert = readTlsFile(config.tlsCertPath, 'TLS certificate');
+    const key = readTlsFile(config.tlsKeyPath, 'TLS private key');
     console.log('🔒 TLS 证书加载成功');
-    return { cert, key };
+    return { cert, key, minVersion: 'TLSv1.2', requestCert: false };
   } catch (err) {
     console.error('❌ TLS 证书加载失败:', err.message);
     process.exit(1);
   }
 })() : null;
 
-const { verify, tokenCount, mode: tokenMode, generateSessionId } = createAuthMiddleware(config);
+let auth;
+try {
+  auth = createAuthMiddleware(config);
+} catch (err) {
+  console.error('❌ Relay 凭据配置无效:', err.message);
+  process.exit(1);
+}
+const { verify, tokenCount, generateSessionId } = auth;
 
 const SCROLLBACK_LIMIT_BYTES = positiveInt(
   process.env.CW_SCROLLBACK_BYTES || config.scrollbackBytes,
@@ -121,7 +131,6 @@ const MAX_SYNC_PENDING_BYTES = positiveInt(
   64 * 1024,
   4 * 1024 * 1024
 );
-const ENABLE_LEGACY_CHAT = config.enableLegacyChat === true;
 
 // ─── 极简 HTTP 控制面 ───────────────────────────────────────────
 // 安装包内自带完整 UI，云端只保留健康检查和 WebSocket 中转。
@@ -162,7 +171,7 @@ function handleHttpRequest(req, res) {
       if (agent.ws && agent.ws.readyState === 1) agentCount++;
     }
     sendJson(req, res, 200, {
-      status: 'ok', tokenMode, tokenCount, agentCount, agentsOnline: agentCount,
+      status: 'ok', tokenMode: 'devices', tokenCount, agentCount, agentsOnline: agentCount,
     });
     return;
   }
@@ -176,30 +185,24 @@ function handleHttpRequest(req, res) {
 
 // ─── HTTP / HTTPS 服务器 ──────────────────────────────────────────
 let server;
-let redirectServer = null;
 
 if (USE_TLS) {
   server = https.createServer(TLS_OPTIONS, handleHttpRequest);
-  if (ENABLE_HTTP_REDIRECT) {
-    redirectServer = http.createServer((req, res) => {
-      const configuredHost = typeof config.publicHost === 'string' ? config.publicHost.trim() : '';
-      const requestHost = String(req.headers.host || '').replace(/:\d+$/, '');
-      const host = configuredHost || requestHost;
-      if (!host || !/^[A-Za-z0-9.-]+$/.test(host)) {
-        res.writeHead(400, { 'Content-Type': 'text/plain; charset=utf-8', 'Cache-Control': 'no-store' });
-        res.end('Invalid Host');
-        return;
-      }
-      const portSuffix = PORT === 443 ? '' : `:${PORT}`;
-      res.writeHead(308, { Location: `https://${host}${portSuffix}${req.url || '/'}` });
-      res.end();
-    });
-  }
 } else {
   server = http.createServer(handleHttpRequest);
 }
 
-const MAX_WS_PAYLOAD_BYTES = positiveInt(process.env.CW_MAX_WS_PAYLOAD_BYTES, 1024 * 1024, 64 * 1024, 8 * 1024 * 1024);
+server.requestTimeout = 10000;
+server.headersTimeout = 8000;
+server.keepAliveTimeout = 5000;
+server.maxHeadersCount = 32;
+
+const MAX_WS_PAYLOAD_BYTES = positiveInt(
+  process.env.CW_MAX_WS_PAYLOAD_BYTES || config.maxWsPayloadBytes,
+  1024 * 1024,
+  64 * 1024,
+  8 * 1024 * 1024
+);
 const MAX_SESSION_ID_LENGTH = 128;
 const MAX_TITLE_LENGTH = 120;
 const MAX_INPUT_BYTES = 64 * 1024;
@@ -212,7 +215,11 @@ const MAX_CWD_LENGTH = 4096;
 const MAX_COLS = 300;
 const MAX_ROWS = 100;
 
-const wss = new WebSocketServer({ server, maxPayload: MAX_WS_PAYLOAD_BYTES });
+const wss = new WebSocketServer({
+  server,
+  maxPayload: MAX_WS_PAYLOAD_BYTES,
+  perMessageDeflate: false,
+});
 wss.on('error', (err) => {
   console.error(`❌ WebSocket Server 错误: ${err.message}`);
 });
@@ -223,7 +230,7 @@ wss.on('error', (err) => {
 const agents = new Map();
 
 // 浏览器客户端：clientId → { ws, token, subscriptions }
-/** @type {Map<string, {ws: WebSocket, token: string, protocolVersion: number, subscriptions: Map<string,any>}>} */
+/** @type {Map<string, {ws: WebSocket, token: string, subscriptions: Map<string,any>}>} */
 const browserClients = new Map();
 
 /** Agent 离线后残留 disconnected 会话的自动清理延迟 */
@@ -393,24 +400,15 @@ async function synchronizeBrowserTerminal(browser, sessionId) {
       if (browser.subscriptions.get(sessionId) !== subscription) return;
     } while (subscription.overflowed);
 
-    const snapshotMessage = browser.protocolVersion >= 2
-      ? {
-          type: 'terminal_snapshot',
-          sessionId,
-          data: snapshot.data,
-          seq: snapshot.sequence,
-          cols: snapshot.cols,
-          rows: snapshot.rows,
-          historyTruncated: snapshot.historyTruncated,
-        }
-      : {
-          // 滚动发布期间已打开的旧页面仍可恢复画面；刷新后会自动使用 v2。
-          type: 'terminal_output',
-          sessionId,
-          data: snapshot.data,
-          replay: true,
-          seq: snapshot.sequence,
-        };
+    const snapshotMessage = {
+      type: 'terminal_snapshot',
+      sessionId,
+      data: snapshot.data,
+      seq: snapshot.sequence,
+      cols: snapshot.cols,
+      rows: snapshot.rows,
+      historyTruncated: snapshot.historyTruncated,
+    };
     if (!safeSend(browser.ws, JSON.stringify(snapshotMessage))) return;
 
     const pending = subscription.pending.filter((item) => item.seq > snapshot.sequence);
@@ -448,11 +446,18 @@ function byteLength(value) {
   return Buffer.byteLength(String(value || ''), 'utf8');
 }
 
+function cleanText(value, fallback, maxLength) {
+  const text = String(value || '')
+    .replace(/[\x00-\x1F\x7F-\x9F]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+  return (text || fallback || '').slice(0, maxLength);
+}
+
 function validSessionId(sessionId) {
   return typeof sessionId === 'string' &&
-    sessionId.length > 0 &&
     sessionId.length <= MAX_SESSION_ID_LENGTH &&
-    !/[\x00-\x1F\x7F]/.test(sessionId);
+    /^[A-Za-z0-9._:-]+$/.test(sessionId);
 }
 
 function sanitizeBrowserMessage(data) {
@@ -460,26 +465,18 @@ function sanitizeBrowserMessage(data) {
   const type = data.type;
 
   if (type === 'ping' || type === 'terminal_list') return { ok: true, data: { type } };
-  if (type === 'chat') {
-    if (!ENABLE_LEGACY_CHAT) return { ok: false, sessionId: data.sessionId, message: 'Legacy chat is disabled' };
-    if (!validSessionId(data.sessionId)) return { ok: false, message: 'Invalid sessionId' };
-    if (typeof data.message !== 'string' || byteLength(data.message) > MAX_INPUT_BYTES) {
-      return { ok: false, sessionId: data.sessionId, message: 'Invalid chat message' };
-    }
-    return { ok: true, data: { type, sessionId: data.sessionId, message: data.message } };
-  }
 
   if (!validSessionId(data.sessionId)) return { ok: false, message: 'Invalid sessionId' };
 
   switch (type) {
     case 'terminal_create': {
-      const title = typeof data.title === 'string' ? data.title.trim() : '';
+      const title = cleanText(data.title, '新会话', MAX_TITLE_LENGTH);
       return {
         ok: true,
         data: {
           type,
           sessionId: data.sessionId,
-          title: (title || '新会话').slice(0, MAX_TITLE_LENGTH),
+          title,
         },
       };
     }
@@ -494,7 +491,7 @@ function sanitizeBrowserMessage(data) {
       return { ok: true, data: { type, sessionId: data.sessionId, cols, rows } };
     }
     case 'terminal_delete':
-      return { ok: true, data: { type, sessionId: data.sessionId, deleteFiles: data.deleteFiles === true } };
+      return { ok: true, data: { type, sessionId: data.sessionId } };
     case 'terminal_attach':
     case 'terminal_resync':
     case 'terminal_detach':
@@ -509,8 +506,8 @@ function sanitizeSession(session) {
   if (!['running', 'exited', 'disconnected'].includes(session.status)) return null;
   return {
     id: session.id,
-    title: (typeof session.title === 'string' ? session.title : '新会话').slice(0, MAX_TITLE_LENGTH),
-    cwd: (typeof session.cwd === 'string' ? session.cwd : '').slice(0, MAX_CWD_LENGTH),
+    title: cleanText(session.title, '新会话', MAX_TITLE_LENGTH),
+    cwd: cleanText(session.cwd, '', MAX_CWD_LENGTH),
     pid: Number.isInteger(session.pid) && session.pid >= 0 ? session.pid : null,
     status: session.status,
     createdAt: Number.isFinite(session.createdAt) ? session.createdAt : Date.now(),
@@ -540,7 +537,8 @@ wss.on('connection', (ws, req) => {
   }
   // Relay 直连公网 TLS，只使用 socket 对端地址，不信任可伪造的转发头。
   const clientIp = getClientIp(req);
-  console.log(`🔗 新连接: ${clientId} from ${clientIp} (agent=${req.headers['user-agent']?.slice(0,40)||'?'})`);
+  const userAgent = cleanText(req.headers['user-agent'], '?', 80);
+  console.log(`🔗 新连接: ${clientId} from ${clientIp} (agent=${userAgent})`);
 
   // 死连接检测：任何来自对端的字节（pong / ping / message）都算存活信号。
   // 只监听 pong 会误杀活着但 pong 偶尔延迟的连接（曾出现每 60s 断一次、
@@ -551,7 +549,10 @@ wss.on('connection', (ws, req) => {
   ws.on('pong', markAlive);
   ws.on('ping', markAlive);
   ws.on('message', markAlive);
-  try { req.socket.setKeepAlive(true, 15000); } catch { /* ignore */ }
+  try {
+    req.socket.setNoDelay(true);
+    req.socket.setKeepAlive(true, 15000);
+  } catch { /* ignore */ }
 
   let authenticated = false;
   let clientType = null;   // 'browser' | 'agent'
@@ -568,7 +569,7 @@ wss.on('connection', (ws, req) => {
     }
   }, 10000);
 
-  ws.on('message', (raw) => {
+  ws.on('message', (raw, isBinary) => {
     ws.isAlive = true;
     const now = Date.now();
     if (now - rateWindowStarted >= 1000) {
@@ -577,7 +578,7 @@ wss.on('connection', (ws, req) => {
       rateMessageBytes = 0;
     }
     rateMessageCount++;
-    rateMessageBytes += raw.length;
+    rateMessageBytes += Buffer.isBuffer(raw) ? raw.length : Buffer.byteLength(String(raw), 'utf8');
     const messageLimit = clientType === 'agent' ? 4000 : 1000;
     const byteLimit = clientType === 'agent' ? 32 * 1024 * 1024 : 4 * 1024 * 1024;
     if (rateMessageCount > messageLimit || rateMessageBytes > byteLimit) {
@@ -585,12 +586,25 @@ wss.on('connection', (ws, req) => {
       ws.close(1008, 'Message rate limit exceeded');
       return;
     }
+    if (isBinary) {
+      malformedMessages++;
+      safeSend(ws, JSON.stringify({ type: 'error', message: 'Binary messages are not supported' }));
+      if (malformedMessages >= 3) ws.close(1008, 'Too many malformed messages');
+      return;
+    }
+
     let data;
     try {
       data = JSON.parse(raw.toString());
     } catch {
       malformedMessages++;
       safeSend(ws, JSON.stringify({ type: 'error', message: 'Invalid JSON' }));
+      if (malformedMessages >= 3) ws.close(1008, 'Too many malformed messages');
+      return;
+    }
+    if (!data || typeof data !== 'object' || Array.isArray(data)) {
+      malformedMessages++;
+      safeSend(ws, JSON.stringify({ type: 'error', message: 'Message must be a JSON object' }));
       if (malformedMessages >= 3) ws.close(1008, 'Too many malformed messages');
       return;
     }
@@ -629,22 +643,32 @@ wss.on('connection', (ws, req) => {
         ws.close(4003, 'Too many browser connections');
         return;
       }
+      if (data.role === 'browser' && data.protocolVersion !== 2) {
+        safeSend(ws, JSON.stringify({ type: 'error', message: 'Unsupported protocol version' }));
+        ws.close(4004, 'Unsupported protocol version');
+        return;
+      }
 
-      rateLimiter.clearFor(clientIp);
-      authenticated = true;
-      boundToken = result.routingKey;
-      clearTimeout(authTimeout);
-
+      let agentSlot = null;
       if (data.role === 'agent') {
-        clientType = 'agent';
-        const slot = ensureAgentSlot(boundToken, result.name);
+        agentSlot = ensureAgentSlot(result.routingKey, result.name);
         // 保留先到且仍健康的 Agent，拒绝后来者。这样重复部署不会让两个
         // Agent 互相踢下线；旧连接若为半开，心跳清理后新连接即可接管。
-        if (slot.ws && slot.ws !== ws && slot.ws.readyState === 1) {
+        if (agentSlot.ws && agentSlot.ws !== ws && agentSlot.ws.readyState === 1) {
           safeSend(ws, JSON.stringify({ type: 'error', message: 'Agent already connected' }));
           ws.close(4000, 'Agent already connected for this token');
           return;
         }
+      }
+
+      rateLimiter.clearFor(clientIp);
+      authenticated = true;
+      clientType = data.role;
+      boundToken = result.routingKey;
+      clearTimeout(authTimeout);
+
+      if (clientType === 'agent') {
+        const slot = agentSlot;
         slot.ws = ws;
         // Agent 重连，取消残留会话清理定时器
         cancelDisconnectedCleanup(boundToken);
@@ -659,11 +683,9 @@ wss.on('connection', (ws, req) => {
         // 请求 Agent 上报会话（Agent 重新上报后会覆盖服务器缓存的旧列表）
         sendToAgent(boundToken, { type: 'terminal_list' });
       } else {
-        clientType = 'browser';
         browserClients.set(clientId, {
           ws,
           token: boundToken,
-          protocolVersion: data.protocolVersion === 2 ? 2 : 1,
           subscriptions: new Map(),
         });
         const slot = agents.get(boundToken);
@@ -705,8 +727,7 @@ wss.on('connection', (ws, req) => {
         case 'terminal_input':
         case 'terminal_resize':
         case 'terminal_delete':
-        case 'terminal_list':
-        case 'chat': {
+        case 'terminal_list': {
           if (msg.type === 'terminal_create') {
             const slot = agents.get(boundToken);
             const alreadyExists = slot && slot.sessions.some((session) => session.id === msg.sessionId);
@@ -802,13 +823,32 @@ wss.on('connection', (ws, req) => {
           }
           break;
         }
-        case 'terminal_exit':
-        case 'terminal_error':
-        case 'stream':
-        case 'status':
+        case 'terminal_exit': {
+          if (!validSessionId(data.sessionId)) break;
+          broadcastToBrowsers(boundToken, {
+            type: 'terminal_exit',
+            sessionId: data.sessionId,
+            exitCode: Number.isInteger(data.exitCode) ? data.exitCode : null,
+            signal: typeof data.signal === 'number'
+              ? data.signal
+              : cleanText(data.signal, '', 40),
+          });
+          break;
+        }
+        case 'terminal_error': {
+          if (!validSessionId(data.sessionId)) break;
+          broadcastToBrowsers(boundToken, {
+            type: 'terminal_error',
+            sessionId: data.sessionId,
+            message: cleanText(data.message, 'Agent 操作失败', 1000),
+          });
+          break;
+        }
         case 'error':
-          if (data.sessionId !== undefined && !validSessionId(data.sessionId)) break;
-          broadcastToBrowsers(boundToken, data);
+          broadcastToBrowsers(boundToken, {
+            type: 'error',
+            message: cleanText(data.message, 'Agent 错误', 1000),
+          });
           break;
         case 'terminal_created': {
           if (!validSessionId(data.sessionId)) break;
@@ -822,12 +862,22 @@ wss.on('connection', (ws, req) => {
             status: data.status,
             createdAt: data.createdAt,
           });
-          if (createdSession) {
-            const existingIndex = slot.sessions.findIndex((session) => session.id === data.sessionId);
-            if (existingIndex >= 0) slot.sessions[existingIndex] = createdSession;
-            else if (slot.sessions.length < MAX_SESSIONS_PER_AGENT) slot.sessions.push(createdSession);
+          if (!createdSession) {
+            safeSend(ws, JSON.stringify({ type: 'error', message: 'Invalid terminal metadata' }));
+            break;
           }
-          broadcastToBrowsers(boundToken, data);
+          const existingIndex = slot.sessions.findIndex((session) => session.id === data.sessionId);
+          if (existingIndex >= 0) slot.sessions[existingIndex] = createdSession;
+          else if (slot.sessions.length < MAX_SESSIONS_PER_AGENT) slot.sessions.push(createdSession);
+          broadcastToBrowsers(boundToken, {
+            type: 'terminal_created',
+            sessionId: createdSession.id,
+            title: createdSession.title,
+            cwd: createdSession.cwd,
+            pid: createdSession.pid,
+            status: createdSession.status,
+            createdAt: createdSession.createdAt,
+          });
           break;
         }
         case 'terminal_closed': {
@@ -840,7 +890,10 @@ wss.on('connection', (ws, req) => {
           for (const [, browser] of browserClients) {
             if (browser.token === boundToken) browser.subscriptions.delete(data.sessionId);
           }
-          broadcastToBrowsers(boundToken, data);
+          broadcastToBrowsers(boundToken, {
+            type: 'terminal_closed',
+            sessionId: data.sessionId,
+          });
           break;
         }
         case 'sessions': {
@@ -938,31 +991,13 @@ server.listen(PORT, BIND_HOST, () => {
   console.log('╔══════════════════════════════════════════╗');
   console.log('║       Remote Terminal Relay 🚀           ║');
   console.log(`║  ${proto} 监听 ${String(BIND_HOST + ':' + PORT).padEnd(24)}║`);
-  const authLabel = tokenMode === 'devices'
-    ? `角色分离 (${tokenCount}台)`
-    : tokenMode === 'mixed'
-      ? `混合兼容 (${tokenCount}台)`
-      : `旧共享 Token (${tokenCount}个)`;
+  const authLabel = `角色分离 (${tokenCount}台)`;
   console.log(`║  🔑 模式: ${authLabel.padEnd(30)}║`);
   if (USE_TLS) console.log('║  🔒 TLS 加密已启用                       ║');
   console.log(`║  🛡  速率限制: ${String(rl.threshold + '次/' + (rl.windowMs/1000) + 's → 封' + (rl.blockMs/1000) + 's').padEnd(25)}║`);
   console.log('╚══════════════════════════════════════════╝');
   console.log('');
 });
-
-if (redirectServer) {
-  const REDIRECT_PORT = config.redirectPort || 80;
-  redirectServer.listen(REDIRECT_PORT, BIND_HOST, () => {
-    console.log(`🔀 HTTP→HTTPS 重定向: ${BIND_HOST}:${REDIRECT_PORT} → ${PORT}`);
-  });
-  redirectServer.on('error', (err) => {
-    if (err.code === 'EACCES') {
-      console.warn(`⚠  无权限监听端口 ${REDIRECT_PORT}（需要 root），跳过 HTTP 重定向`);
-    } else {
-      console.warn(`⚠  HTTP 重定向服务器启动失败 (端口 ${REDIRECT_PORT}): ${err.message}`);
-    }
-  });
-}
 
 let shutdownStarted = false;
 function shutdown(signal) {
@@ -978,11 +1013,10 @@ function shutdown(signal) {
   for (const [, slot] of agents) { if (slot.ws) slot.ws.close(1001, 'Server shutting down'); }
   wss.close();
   const forceExit = setTimeout(() => process.exit(1), 5000);
-  forceExit.unref();
   server.close(() => {
+    clearTimeout(forceExit);
     process.exit(0);
   });
-  if (redirectServer) redirectServer.close();
 }
 process.on('SIGINT', () => shutdown('SIGINT'));
 process.on('SIGTERM', () => shutdown('SIGTERM'));

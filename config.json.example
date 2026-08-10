@@ -1,10 +1,7 @@
 {
-  "_comment": "=== Remote Terminal 配置文件 ===",
-  "_instructions": "复制为 config.json；替换所有 change-me/example.com 示例值，不要提交 config.json",
-
+  "_comment": "Remote Terminal Relay 配置；复制为 config.json，并执行 chmod 600 config.json",
   "port": 443,
   "bindHost": "0.0.0.0",
-  "_server_listen_comment": "生产 Relay 直接监听 443；systemd 仅授予绑定低端口所需的 CAP_NET_BIND_SERVICE",
 
   "devices": {
     "server-a": {
@@ -13,48 +10,21 @@
       "agentToken": "change-me-agent-random-token-02"
     }
   },
-  "_devices_comment": "每台设备使用彼此不同的浏览器和 Agent Token，防止浏览器凭据伪装 Agent",
-
-  "agentToken": "change-me-agent-random-token-02",
-  "_agent_token_comment": "Agent 使用 devices 中对应的 agentToken；也可用 CLAUDE_WEB_TOKEN 覆盖",
-
-  "serverUrl": "wss://terminal.example.com",
-  "_server_url_comment": "Agent 主动连接的完整地址，推荐 WSS 443，可带路径。CW_SERVER_URL 可覆盖",
-
-  "proxyUrl": "",
-  "noProxy": "localhost,127.0.0.1",
-  "_proxy_comment": "可选 HTTP/HTTPS 出口代理；也支持 HTTPS_PROXY、HTTP_PROXY 和 NO_PROXY",
-
-  "workspaceRoot": "~/WebClaudeWorkspaces",
-  "_workspace_root_comment": "Agent 终端的起始目录。Shell 仍可访问运行用户有权限访问的其他路径，这不是系统沙箱",
+  "_devices_comment": "每台设备必须使用彼此不同、至少 32 字符的 browserToken 和 agentToken",
 
   "maxSessions": 12,
   "maxBrowsersPerToken": 8,
   "maxTotalConnections": 200,
   "maxWsBufferedBytes": 2097152,
+  "maxWsPayloadBytes": 1048576,
   "scrollbackBytes": 524288,
   "scrollbackRows": 10000,
   "maxSyncPendingBytes": 524288,
-  "offlineOutputBytes": 524288,
-  "_limits_comment": "限制 PTY/浏览器数量、完整终端状态历史，以及同步期间的增量输出缓存",
-
-  "auditEnabled": true,
-  "auditLogPath": "~/WebClaudeWorkspaces/.audit.log",
-  "auditMaxBytes": 10485760,
-  "_audit_comment": "审计日志默认 0600 权限并自动轮转；日志可能包含输入的敏感命令，可按风险关闭",
-
-  "enableLegacyChat": false,
-  "claudeDangerouslySkipPermissions": false,
-  "_legacy_chat_comment": "旧 claude -p 聊天协议默认关闭；即使启用也默认保留 Claude 权限确认",
+  "_limits_comment": "限制连接、会话、消息、浏览器背压和终端历史占用",
 
   "useTLS": true,
   "tlsCertPath": "/etc/remote-terminal/tls/fullchain.pem",
   "tlsKeyPath": "/etc/remote-terminal/tls/privkey.pem",
-  "enableHttpRedirect": false,
-  "redirectPort": 80,
-  "_direct_tls_comment": "Relay 原生提供 HTTPS/WSS；默认不监听 80，为 Certbot standalone 自动续期保留端口",
-
-  "serverHost": "",
-  "serverPort": 443,
-  "_legacy_connection_comment": "serverHost/serverPort 仅兼容旧 Agent 配置；设置 serverUrl 后忽略"
+  "healthDetails": false,
+  "_tls_comment": "Relay 原生提供 HTTPS/WSS；不监听 80，不提供网页端"
 }

@@ -31,6 +31,9 @@
       this.handshakeTimeoutMs = Number.isFinite(Number(options.handshakeTimeoutMs))
         ? Math.max(0, Number(options.handshakeTimeoutMs))
         : 0;
+      this.maxBufferedAmount = Number.isFinite(Number(options.maxBufferedAmount))
+        ? Math.max(64 * 1024, Number(options.maxBufferedAmount))
+        : 2 * 1024 * 1024;
     }
 
     _isCurrent(socket, generation) {
@@ -67,7 +70,6 @@
         try { socket.close(event?.code || 1000, event?.reason || 'Client reconnect'); } catch { /* ignore */ }
       }
       try {
-        if (this.options.onSocket) this.options.onSocket(null);
         if (this.options.onDisconnect) this.options.onDisconnect(event || { code: 1006 });
       } catch (err) {
         this._reportError(err);
@@ -77,9 +79,13 @@
     }
 
     connect() {
-      const token = this.options.getToken();
+      let token;
+      try { token = this.options.getToken(); } catch (err) {
+        this._reportError(err);
+        return false;
+      }
       if (!token) {
-        if (this.options.onNoToken) this.options.onNoToken();
+        try { if (this.options.onNoToken) this.options.onNoToken(); } catch (err) { this._reportError(err); }
         return false;
       }
 
@@ -98,7 +104,6 @@
       }
       this.socket = socket;
       this.authenticated = false;
-      if (this.options.onSocket) this.options.onSocket(socket);
       if (this.handshakeTimeoutMs > 0) {
         this.handshakeTimer = this.setTimer(() => {
           this.handshakeTimer = null;
@@ -114,9 +119,11 @@
       socket.onopen = () => {
         if (!this._isCurrent(socket, generation)) return;
         try {
+          const currentToken = this.options.getToken();
+          if (!currentToken) throw new Error('WebSocket credential is no longer available');
           socket.send(JSON.stringify({
             type: 'auth',
-            token: this.options.getToken(),
+            token: currentToken,
             role: 'browser',
             protocolVersion: 2,
           }));
@@ -128,8 +135,31 @@
       socket.onmessage = (event) => {
         if (!this._isCurrent(socket, generation)) return;
         let data;
-        try { data = JSON.parse(event.data); } catch { return; }
-        this.options.onMessage(data);
+        try { data = JSON.parse(event.data); } catch {
+          this._reportError(new Error('Relay returned invalid JSON'));
+          return;
+        }
+        if (!data || typeof data !== 'object' || Array.isArray(data)) {
+          this._reportError(new Error('Relay message must be a JSON object'));
+          return;
+        }
+        if (!this.authenticated && !['auth_ok', 'error'].includes(data.type)) {
+          this._reportError(new Error('Relay sent a control message before authentication'));
+          this._disconnectCurrent(socket, generation, {
+            code: 4002,
+            reason: 'Protocol violation',
+          }, true);
+          return;
+        }
+        if (data.type === 'auth_ok' && (data.role !== 'browser' || this.authenticated)) {
+          this._reportError(new Error('Relay returned an invalid authentication response'));
+          this._disconnectCurrent(socket, generation, {
+            code: 4002,
+            reason: 'Invalid authentication response',
+          }, true);
+          return;
+        }
+        try { this.options.onMessage(data); } catch (err) { this._reportError(err); }
       };
       socket.onclose = (event) => {
         this._disconnectCurrent(socket, generation, event);
@@ -152,6 +182,10 @@
 
     send(data) {
       if (!this.socket || this.socket.readyState !== 1 || !this.authenticated) return false;
+      if (this.socket.bufferedAmount > this.maxBufferedAmount) {
+        this._reportError(new Error('WebSocket send buffer is full'));
+        return false;
+      }
       try {
         this.socket.send(JSON.stringify(data));
         return true;
@@ -161,7 +195,13 @@
     }
 
     _scheduleReconnect() {
-      if (this.reconnectTimer !== null || !this.reconnectEnabled || !this.options.getToken()) return;
+      if (this.reconnectTimer !== null || !this.reconnectEnabled) return;
+      try {
+        if (!this.options.getToken()) return;
+      } catch (err) {
+        this._reportError(err);
+        return;
+      }
       const base = Math.min(1000 * Math.pow(2, Math.min(this.reconnectAttempts, 5)), 30000);
       const delay = Math.round(base * (0.8 + this.random() * 0.4));
       this.reconnectAttempts++;
@@ -182,14 +222,19 @@
       this.generation++;
       this.socket = null;
       this.authenticated = false;
-      if (this.options.onSocket) this.options.onSocket(null);
       if (socket && socket.readyState !== 3) {
         try { socket.close(code, reason); } catch { /* ignore */ }
       }
     }
 
     reconnectNow() {
-      if (!this.reconnectEnabled || !this.options.getToken()) return false;
+      if (!this.reconnectEnabled) return false;
+      try {
+        if (!this.options.getToken()) return false;
+      } catch (err) {
+        this._reportError(err);
+        return false;
+      }
       this.disconnect(1000, 'Immediate reconnect');
       this.reconnectAttempts = 0;
       return this.connect();

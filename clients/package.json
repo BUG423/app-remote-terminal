@@ -1,6 +1,6 @@
 {
   "name": "remote-terminal-client-ui",
-  "version": "0.3.0",
+  "version": "0.3.3",
   "private": true,
   "description": "Shared offline UI dependencies for Remote Terminal clients",
   "dependencies": {

@@ -40,9 +40,127 @@ svg { width: 1.25em; height: 1.25em; fill: none; stroke: currentColor; stroke-wi
 
 /* 桌面主界面 */
 #main-screen { display: flex; background: var(--bg); }
+#desktop-device-rail {
+  position: relative;
+  display: flex;
+  align-items: center;
+  flex: 0 0 92px;
+  flex-direction: column;
+  min-width: 0;
+  padding: 14px 8px 12px;
+  background: #11161d;
+  border-right: 1px solid #272f3a;
+}
+.device-rail-brand {
+  display: grid;
+  place-items: center;
+  flex: 0 0 44px;
+  width: 44px;
+  height: 44px;
+  color: #fff;
+  font: 750 13px/1 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  background: linear-gradient(145deg, #438fff, #176bd8);
+  border-radius: 13px;
+  box-shadow: 0 8px 22px rgba(22, 107, 216, .25);
+}
+.device-rail-heading { margin: 11px 0 7px; color: #778290; font-size: 10px; letter-spacing: .12em; }
+.device-rail-list {
+  display: flex;
+  align-items: stretch;
+  width: 100%;
+  min-height: 0;
+  flex: 1;
+  flex-direction: column;
+  gap: 4px;
+  overflow-x: hidden;
+  overflow-y: auto;
+  scrollbar-width: none;
+}
+.device-rail-list::-webkit-scrollbar { display: none; }
+.device-rail-item {
+  position: relative;
+  display: flex;
+  align-items: center;
+  width: 100%;
+  min-height: 67px;
+  padding: 6px 3px;
+  color: #8994a2;
+  background: transparent;
+  border: 0;
+  border-radius: 12px;
+  cursor: pointer;
+  outline: none;
+}
+.device-rail-item:hover, .device-rail-item:focus-visible { color: #dce4ee; background: #1b222c; }
+.device-rail-item.active { color: #fff; background: #202a36; }
+.device-rail-item.active::before {
+  content: "";
+  position: absolute;
+  top: 15px;
+  bottom: 15px;
+  left: -8px;
+  width: 3px;
+  background: var(--accent);
+  border-radius: 0 3px 3px 0;
+}
+.device-rail-avatar {
+  position: relative;
+  display: grid;
+  place-items: center;
+  flex: 0 0 36px;
+  width: 36px;
+  height: 36px;
+  color: #d7e7fb;
+  font-size: 14px;
+  font-weight: 700;
+  background: linear-gradient(145deg, #34475e, #253448);
+  border-radius: 11px;
+}
+.device-rail-item.active .device-rail-avatar { color: #fff; background: linear-gradient(145deg, #438fff, #176bd8); }
+.device-rail-status {
+  position: absolute;
+  right: -2px;
+  bottom: -2px;
+  width: 10px;
+  height: 10px;
+  background: #697483;
+  border: 2px solid #11161d;
+  border-radius: 50%;
+}
+.device-rail-item:hover .device-rail-status, .device-rail-item.active .device-rail-status { border-color: #202a36; }
+.device-rail-status.online { background: var(--success); }
+.device-rail-status.relay { background: var(--warn); }
+.device-rail-name {
+  display: block;
+  width: 100%;
+  margin-top: 5px;
+  padding: 0 2px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  font-size: 10px;
+}
+.device-rail-empty { padding: 18px 3px; color: #6f7986; text-align: center; font-size: 10px; line-height: 1.55; }
+.rail-icon-button {
+  display: grid;
+  place-items: center;
+  flex: 0 0 38px;
+  width: 38px;
+  height: 38px;
+  padding: 0;
+  color: #8994a2;
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 11px;
+  cursor: pointer;
+}
+.rail-icon-button:hover, .rail-icon-button:focus-visible { color: #fff; background: #202832; border-color: #303b48; outline: none; }
+.rail-icon-button svg { width: 20px; height: 20px; }
+.device-rail-add { margin-top: 7px; border-color: #303a46; }
+.device-rail-footer { display: flex; align-items: center; flex-direction: column; gap: 7px; margin-top: 12px; padding-top: 11px; border-top: 1px solid #29313c; }
 #sidebar {
   display: flex;
-  flex: 0 0 300px;
+  flex: 0 0 320px;
   flex-direction: column;
   min-width: 0;
   background: var(--bg-2);
@@ -52,22 +170,15 @@ svg { width: 1.25em; height: 1.25em; fill: none; stroke: currentColor; stroke-wi
   display: flex;
   align-items: center;
   justify-content: space-between;
-  min-height: 60px;
+  min-height: 68px;
   padding: 12px 14px 12px 18px;
   border-bottom: 1px solid var(--border);
 }
 .brand-wrap { min-width: 0; }
-.brand { display: flex; align-items: center; gap: 9px; font-size: 14px; font-weight: 650; white-space: nowrap; }
-.brand-mark {
-  display: inline-grid;
-  place-items: center;
-  width: 30px;
-  height: 30px;
-  color: #fff;
-  font: 700 11px/1 ui-monospace, monospace;
-  background: var(--accent-strong);
-  border-radius: 8px;
-}
+.brand { display: flex; font-size: 14px; white-space: nowrap; }
+.desktop-brand { align-items: flex-start; flex-direction: column; gap: 3px; }
+.desktop-brand strong { color: var(--text); font-size: 15px; font-weight: 680; }
+.desktop-brand small { max-width: 210px; color: var(--text-muted); font-size: 10px; font-weight: 500; overflow: hidden; text-overflow: ellipsis; }
 .sidebar-actions { display: flex; gap: 7px; }
 .icon-button, .header-icon-button {
   display: inline-grid;
@@ -212,7 +323,7 @@ svg { width: 1.25em; height: 1.25em; fill: none; stroke: currentColor; stroke-wi
   align-items: center;
   justify-content: space-between;
   flex: 0 0 auto;
-  min-height: 60px;
+  min-height: 68px;
   padding: 9px 16px;
   background: var(--bg-2);
   border-bottom: 1px solid var(--border);
@@ -239,11 +350,11 @@ svg { width: 1.25em; height: 1.25em; fill: none; stroke: currentColor; stroke-wi
 #tile-view-btn:hover:not(:disabled), #rename-session-btn:hover:not(:disabled) { color: var(--accent); border-color: var(--accent); }
 #tile-view-btn.active { color: #fff; background: var(--accent-strong); border-color: var(--accent-strong); }
 .danger:disabled, #tile-view-btn:disabled, #rename-session-btn:disabled { opacity: .35; cursor: not-allowed; }
-#terminals { position: relative; flex: 1; min-height: 0; overflow: hidden; background: #0d1117; }
-.term-container { position: absolute; inset: 0; padding: 5px; }
-.term-container .xterm { width: 100% !important; height: 100% !important; }
+#terminals { position: relative; flex: 1; min-width: 0; min-height: 0; overflow: hidden; background: #0d1117; }
+.term-container { position: absolute; inset: 0; min-width: 0; min-height: 0; overflow: hidden; }
+/* FitAddon 会读取父容器尺寸，并自动扣除 xterm 自身的 padding。 */
+.term-container .xterm { width: 100% !important; height: 100% !important; padding: 5px; }
 .term-container .xterm-viewport {
-  width: 100% !important;
   overscroll-behavior: contain;
   touch-action: pan-y;
   -webkit-overflow-scrolling: touch;
@@ -263,8 +374,23 @@ svg { width: 1.25em; height: 1.25em; fill: none; stroke: currentColor; stroke-wi
   cursor: pointer;
   font-size: 12px;
 }
-#terminals.tiled { display: grid; gap: 2px; overflow: auto; background: var(--border); }
-#terminals.tiled .term-container { position: relative; inset: auto; min-height: 220px; background: #0d1117; }
+#terminals.tiled {
+  display: grid;
+  grid-auto-rows: minmax(220px, 1fr);
+  align-items: stretch;
+  gap: 2px;
+  overflow: auto;
+  background: var(--border);
+}
+#terminals.tiled .term-container {
+  position: relative;
+  inset: auto;
+  width: 100%;
+  min-width: 0;
+  min-height: 220px;
+  background: #0d1117;
+}
+#terminals.tiled .term-container.active-tile { box-shadow: inset 0 0 0 1px var(--accent); }
 #terminals.tiled .empty-hint { position: relative; grid-column: 1 / -1; }
 .empty-hint { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; flex-direction: column; gap: 14px; padding: 24px; color: var(--text-muted); text-align: center; }
 .empty-icon { display: grid; place-items: center; width: 66px; height: 66px; color: var(--accent); font-size: 28px; background: #172337; border-radius: 18px; }
@@ -402,6 +528,16 @@ svg { width: 1.25em; height: 1.25em; fill: none; stroke: currentColor; stroke-wi
 .device-empty h2 { margin-bottom: 8px; color: var(--text); }
 .device-empty p { margin-bottom: 22px; line-height: 1.7; }
 
+@media (min-width: 761px) {
+  #main-screen[data-desktop-view="devices"] #sidebar { display: none; }
+}
+
+@media (min-width: 761px) and (max-width: 1020px) {
+  #desktop-device-rail { flex-basis: 80px; padding-right: 6px; padding-left: 6px; }
+  #sidebar { flex-basis: 284px; }
+  .desktop-brand small { max-width: 175px; }
+}
+
 /* 手机端：会话列表是首页，终端是二级页面 */
 @media (max-width: 760px) {
   :root { color-scheme: light; }
@@ -527,7 +663,8 @@ svg { width: 1.25em; height: 1.25em; fill: none; stroke: currentColor; stroke-wi
   #tile-view-btn, #delete-session-btn, #active-status { display: none; }
   #mobile-session-more svg { fill: currentColor; stroke: none; }
   #terminals { flex: 1; min-height: 0; }
-  .term-container { padding: 5px 4px; }
+  .term-container { padding: 0; }
+  .term-container .xterm { padding: 5px 4px; }
   .term-container .xterm-viewport { touch-action: pan-y; }
   .history-bottom { right: 12px; bottom: 70px; min-height: 34px; color: #fff; background: rgba(35, 45, 58, .94); }
   .empty-hint { font-size: 13px; }

@@ -6,58 +6,30 @@
  *   - 连接云服务器（带自动重连）
  *   - 管理多个交互式终端会话（创建 / 输入 / resize / 删除）
  *   - 每个会话在共享的工作区根目录下启动
- *   - 兼容旧的 Claude Code 聊天协议（chat / stream-json）
  * ═══════════════════════════════════════════════════════════════
  */
 
-const { spawn } = require('child_process');
 const path = require('path');
-const fs = require('fs');
-const os = require('os');
 const WebSocket = require('ws');
 const sessionManager = require('./session-manager');
-const auditLog = require('./audit-log');
 const { OutputBacklog, splitUtf8 } = require('./output-backlog');
 const { TerminalState } = require('./terminal-state');
 const { buildServerUrl, createConnectionOptions, displayUrl } = require('./connection-options');
+const { verifyRuntimeIdentity } = require('./runtime-identity');
+const { loadConfig } = require('../lib/load-config');
 
 // ─── 配置 ───────────────────────────────────────────────────────
-const CONFIG_PATH = process.env.CW_CONFIG_PATH || path.join(__dirname, '..', 'config.json');
+const CONFIG_PATH = process.env.CW_CONFIG_PATH || path.join(__dirname, 'config.json');
 let config;
 try {
-  config = JSON.parse(fs.readFileSync(CONFIG_PATH, 'utf-8'));
+  config = loadConfig(CONFIG_PATH, { label: 'Agent configuration' });
 } catch (err) {
-  console.error('❌ 加载 config.json 失败，请复制 config.json.example 为 config.json 并编辑。');
+  console.error('❌ Agent 配置加载失败，请根据 agent/config.json.example 创建受限权限配置。');
   console.error(err.message);
   process.exit(1);
 }
 
-// 极简 .env 加载：把 ../.env 中的 KEY=VALUE 注入 process.env
-(function loadDotEnv() {
-  try {
-    const raw = fs.readFileSync(path.join(__dirname, '..', '.env'), 'utf-8');
-    for (const line of raw.split('\n')) {
-      const m = line.match(/^\s*([\w.]+)\s*=\s*(.*)\s*$/);
-      if (m && !process.env[m[1]]) process.env[m[1]] = m[2].replace(/^["']|["']$/g, '');
-    }
-  } catch { /* 无 .env 文件则忽略 */ }
-})();
-
-// token 优先级：环境变量 > agentToken > config.token > 唯一的 config.tokens 条目。
-if (process.env.CLAUDE_WEB_TOKEN) {
-  config.token = process.env.CLAUDE_WEB_TOKEN;
-} else if (config.agentToken) {
-  config.token = config.agentToken;
-} else if (!config.token && config.devices && Object.keys(config.devices).length === 1) {
-  config.token = Object.values(config.devices)[0]?.agentToken;
-} else if (!config.token && config.tokens && Object.keys(config.tokens).length === 1) {
-  config.token = Object.keys(config.tokens)[0];
-}
-
-const {
-  token,
-  workspaceRoot,
-} = config;
+const token = process.env.CW_AGENT_TOKEN || config.agentToken;
 
 const MAX_SESSION_ID_LENGTH = 128;
 const MAX_TITLE_LENGTH = 120;
@@ -70,16 +42,9 @@ function failConfig(message) {
   process.exit(1);
 }
 
-if (config.tokens && Object.keys(config.tokens).length > 1 &&
-    !process.env.CLAUDE_WEB_TOKEN && !config.agentToken && !config.token) {
-  failConfig('配置了多个 tokens 时，Agent 必须设置 agentToken 或 CLAUDE_WEB_TOKEN');
-}
-if (config.devices && Object.keys(config.devices).length > 1 &&
-    !process.env.CLAUDE_WEB_TOKEN && !config.agentToken && !config.token) {
-  failConfig('配置了多个 devices 时，Agent 必须设置 agentToken 或 CLAUDE_WEB_TOKEN');
-}
-if (!token || typeof token !== 'string' || token.length < 32 || /change-me|deprecated|your-token/i.test(token)) {
-  failConfig('token 必须存在、至少 32 个字符，且不能使用示例值');
+if (typeof token !== 'string' || token.length < 32 || token.length > 512 ||
+    Buffer.byteLength(token, 'utf8') > 1024 || /change-me|deprecated|your-token|shared-secret/i.test(token)) {
+  failConfig('agentToken 必须为 32-512 个字符，且不能使用示例值');
 }
 
 let SERVER_URL;
@@ -92,15 +57,18 @@ try {
   failConfig(err.message);
 }
 
-const ROOT = sessionManager.setWorkspaceRoot(workspaceRoot);
-if (typeof process.getuid === 'function' && process.getuid() === 0) {
-  console.warn('⚠  Agent 正以 root 运行；浏览器终端将拥有 root 权限。生产环境应使用专用低权限账户或容器。');
+let runtimeIdentity;
+try {
+  runtimeIdentity = verifyRuntimeIdentity(config);
+} catch (err) {
+  failConfig(`运行身份不符合配置: ${err.message}`);
 }
-auditLog.configure({
-  path: process.env.CW_AUDIT_LOG || config.auditLogPath || path.join(ROOT, '.audit.log'),
-  maxBytes: Number(process.env.CW_AUDIT_MAX_BYTES || config.auditMaxBytes) || 10 * 1024 * 1024,
-  enabled: config.auditEnabled !== false && process.env.CW_AUDIT_ENABLED !== 'false',
-});
+const ROOT = sessionManager.setWorkspaceRoot(runtimeIdentity.workingDirectory);
+console.log(
+  `👤 运行身份已锁定: user=${runtimeIdentity.username}` +
+  `${runtimeIdentity.uid === null ? '' : ` uid=${runtimeIdentity.uid}`}` +
+  ` home=${runtimeIdentity.home} cwd=${ROOT}`
+);
 
 function positiveInt(value, fallback, min, max) {
   const parsed = Number(value);
@@ -114,9 +82,6 @@ const OFFLINE_OUTPUT_BYTES = positiveInt(
   16 * 1024,
   4 * 1024 * 1024
 );
-const ENABLE_LEGACY_CHAT = config.enableLegacyChat === true;
-const LEGACY_CHAT_SKIP_PERMISSIONS = config.claudeDangerouslySkipPermissions === true;
-const MAX_CHAT_QUEUE = 20;
 const offlineOutput = new OutputBacklog(OFFLINE_OUTPUT_BYTES);
 const terminalStates = new Map();
 const closedTerminalIds = new Set();
@@ -148,13 +113,14 @@ function byteLength(value) {
 
 function validSessionId(sessionId) {
   return typeof sessionId === 'string' &&
-    sessionId.length > 0 &&
     sessionId.length <= MAX_SESSION_ID_LENGTH &&
-    !/[\x00-\x1F\x7F]/.test(sessionId);
+    /^[A-Za-z0-9._:-]+$/.test(sessionId);
 }
 
 function sanitizeTitle(title) {
-  const value = typeof title === 'string' ? title.trim() : '';
+  const value = typeof title === 'string'
+    ? title.replace(/[\x00-\x1F\x7F-\x9F]/g, ' ').replace(/\s+/g, ' ').trim()
+    : '';
   return (value || '新会话').slice(0, MAX_TITLE_LENGTH);
 }
 
@@ -173,17 +139,30 @@ const MAX_WS_BUFFERED_BYTES = positiveInt(
   64 * 1024,
   32 * 1024 * 1024
 );
-const HEARTBEAT_MS = Number(process.env.CW_HEARTBEAT_MS) || 25000;       // 每 25s 发一次心跳
-const PONG_TIMEOUT_MS = Number(process.env.CW_PONG_TIMEOUT_MS) || 70000; // 超过 70s 没收到任何 pong → 判定连接已死
-
-// 旧聊天协议：每会话的 claude 进程
-const chatProcesses = new Map(); // sessionId -> { proc, queue, history }
+const HEARTBEAT_MS = positiveInt(
+  process.env.CW_HEARTBEAT_MS || config.heartbeatMs,
+  25000,
+  5000,
+  120000
+);
+const PONG_TIMEOUT_MS = Math.max(
+  HEARTBEAT_MS * 2,
+  positiveInt(process.env.CW_PONG_TIMEOUT_MS || config.pongTimeoutMs, 70000, 15000, 300000)
+);
+const AUTH_TIMEOUT_MS = positiveInt(
+  process.env.CW_AUTH_TIMEOUT_MS || config.authTimeoutMs,
+  15000,
+  3000,
+  120000
+);
 
 // ─── WebSocket 连接 ─────────────────────────────────────────────
 function connect() {
   if (shuttingDown) return;
+  if (ws && ws.readyState !== WebSocket.CLOSED) return;
   console.log(`🔗 正在连接服务器: ${displayUrl(SERVER_URL)}`);
   let socket;
+  let authTimer = null;
   try {
     socket = new WebSocket(SERVER_URL, WS_OPTIONS);
   } catch (err) {
@@ -194,19 +173,45 @@ function connect() {
   ws = socket;
 
   socket.on('open', () => {
+    if (ws !== socket || shuttingDown) {
+      try { socket.close(1000, 'Connection no longer needed'); } catch { /* ignore */ }
+      return;
+    }
     console.log('✅ 已连接到服务器');
-    reconnectAttempts = 0;
     lastPongAt = Date.now();
-    // 开启 TCP keepalive，让操作系统也能较快发现死链
-    try { socket._socket && socket._socket.setKeepAlive(true, 15000); } catch { /* ignore */ }
-    socket.send(JSON.stringify({ type: 'auth', token, role: 'agent' }));
+    // 交互式终端以小数据包为主，禁用 Nagle，避免逐键回显等待合包。
+    try {
+      if (socket._socket) {
+        socket._socket.setNoDelay(true);
+        socket._socket.setKeepAlive(true, 15000);
+      }
+    } catch { /* ignore */ }
+    try {
+      socket.send(JSON.stringify({ type: 'auth', token, role: 'agent' }));
+    } catch (err) {
+      console.warn('⚠  发送 Agent 鉴权消息失败:', err.message);
+      try { socket.terminate(); } catch { /* ignore */ }
+      return;
+    }
+    authTimer = setTimeout(() => {
+      if (ws === socket && !authenticated) {
+        console.warn(`⚠  ${AUTH_TIMEOUT_MS / 1000}s 内未完成 Agent 鉴权，主动重连`);
+        try { socket.terminate(); } catch { /* ignore */ }
+      }
+    }, AUTH_TIMEOUT_MS);
+    authTimer.unref();
   });
 
   // 协议层 pong（服务器若用 ws.ping() 探测，这里自动回应并记录存活）
   socket.on('pong', () => { lastPongAt = Date.now(); });
 
-  socket.on('message', (raw) => {
+  socket.on('message', (raw, isBinary) => {
     if (ws !== socket) return;
+    if (isBinary) {
+      console.warn('⚠  Relay 发送了不支持的二进制消息，主动重连');
+      try { socket.terminate(); } catch { /* ignore */ }
+      return;
+    }
     let data;
     try {
       data = JSON.parse(raw.toString());
@@ -214,10 +219,24 @@ function connect() {
       console.warn('⚠  收到无效 JSON');
       return;
     }
+    if (!data || typeof data !== 'object' || Array.isArray(data)) {
+      console.warn('⚠  收到的消息不是 JSON 对象');
+      return;
+    }
+    if (!authenticated && data.type !== 'auth_ok') {
+      console.warn('⚠  Relay 在鉴权完成前发送了控制消息，主动重连');
+      try { socket.terminate(); } catch { /* ignore */ }
+      return;
+    }
     handleMessage(data, socket);
+    if (authenticated && authTimer) {
+      clearTimeout(authTimer);
+      authTimer = null;
+    }
   });
 
   socket.on('close', (code) => {
+    if (authTimer) clearTimeout(authTimer);
     console.log(`🔌 与服务器断开 (code: ${code})`);
     if (ws !== socket) return;
     authenticated = false;
@@ -274,12 +293,29 @@ function reportSessions() {
 }
 
 // ─── 终端输出批处理 ─────────────────────────────────────────────
-// PTY 常在极短时间内产生大量小数据块（如 shell 启动横幅 fortune|cowsay|lolcat
-// 会逐字符发送上百条彩色转义序列）。逐块走 WS 会放大延迟与卡顿。
-// 这里按 ~12ms 窗口合并成一条消息发送，保持流畅手感的同时大幅减少消息数。
-const outBuffers = new Map(); // sessionId -> { data, timer }
-const OUT_FLUSH_MS = 12;
+// 逐键回显要立即发送；连续刷屏则使用很短的合并窗口，避免大量 WebSocket
+// 小包放大 Relay 和客户端负载。两者不能共用一个固定延迟。
+const outBuffers = new Map();
+const interactiveOutputPending = new Set();
+const OUT_FLUSH_MS = positiveInt(
+  process.env.CW_OUTPUT_FLUSH_MS ?? config.outputFlushMs,
+  4,
+  0,
+  50
+);
 const OUT_MAX_BYTES = 64 * 1024;
+const OUT_BULK_CHUNK_BYTES = 1024;
+const OUT_BULK_WINDOW_MS = 10;
+const OUT_BULK_WINDOW_BYTES = 2048;
+const OUT_BULK_WINDOW_CHUNKS = 12;
+const OUT_BULK_HOLD_MS = 50;
+
+function scheduleOutputFlush(sessionId, buffer, delay) {
+  if (buffer.timer && delay === buffer.scheduledDelay) return;
+  if (buffer.timer) clearTimeout(buffer.timer);
+  buffer.scheduledDelay = delay;
+  buffer.timer = setTimeout(() => flushOutput(sessionId), delay);
+}
 
 function queueOutput(sessionId, chunk) {
   if (closedTerminalIds.has(sessionId)) return;
@@ -291,20 +327,52 @@ function queueOutput(sessionId, chunk) {
   } catch (err) {
     console.error(`⚠  本地终端状态记录失败 (${sessionId}):`, err.message);
   }
+  const chunkBytes = Buffer.byteLength(chunk);
+  const now = Date.now();
   let b = outBuffers.get(sessionId);
-  if (!b) { b = { data: '', timer: null }; outBuffers.set(sessionId, b); }
+  if (!b) {
+    b = {
+      data: '',
+      bytes: 0,
+      timer: null,
+      scheduledDelay: 0,
+      windowStartedAt: now,
+      windowBytes: 0,
+      windowChunks: 0,
+      bulkUntil: 0,
+    };
+    outBuffers.set(sessionId, b);
+  }
+  if (now - b.windowStartedAt > OUT_BULK_WINDOW_MS) {
+    b.windowStartedAt = now;
+    b.windowBytes = 0;
+    b.windowChunks = 0;
+  }
+  b.windowBytes += chunkBytes;
+  b.windowChunks++;
+  // 每次用户输入后的首段小输出优先立即回传；即使上一条命令正在刷屏，
+  // 按键回显也不能被批处理窗口拖住。
+  const interactiveOutput = interactiveOutputPending.delete(sessionId) && chunkBytes < OUT_BULK_CHUNK_BYTES;
+  const bulkOutput = !interactiveOutput && (now < b.bulkUntil || chunkBytes >= OUT_BULK_CHUNK_BYTES ||
+    b.windowBytes >= OUT_BULK_WINDOW_BYTES || b.windowChunks >= OUT_BULK_WINDOW_CHUNKS);
+  if (bulkOutput) b.bulkUntil = now + OUT_BULK_HOLD_MS;
+
   b.data += chunk;
-  if (Buffer.byteLength(b.data) >= OUT_MAX_BYTES) { flushOutput(sessionId); return; }
-  if (!b.timer) b.timer = setTimeout(() => flushOutput(sessionId), OUT_FLUSH_MS);
+  b.bytes += chunkBytes;
+  if (b.bytes >= OUT_MAX_BYTES) { flushOutput(sessionId); return; }
+  scheduleOutputFlush(sessionId, b, bulkOutput ? OUT_FLUSH_MS : 0);
 }
 
 function flushOutput(sessionId) {
   const b = outBuffers.get(sessionId);
   if (!b) return;
-  if (b.timer) { clearTimeout(b.timer); b.timer = null; }
+  if (b.timer) clearTimeout(b.timer);
+  b.timer = null;
+  b.scheduledDelay = 0;
   if (b.data) {
     const data = b.data;
     b.data = '';
+    b.bytes = 0;
     sendOutputData(sessionId, data, false);
   }
 }
@@ -328,6 +396,7 @@ function dropOutputBuffer(sessionId) {
   const b = outBuffers.get(sessionId);
   if (b && b.timer) clearTimeout(b.timer);
   outBuffers.delete(sessionId);
+  interactiveOutputPending.delete(sessionId);
   offlineOutput.drop(sessionId);
   dropTerminalState(sessionId);
 }
@@ -351,39 +420,41 @@ function flushOfflineOutput() {
  * snapshots have been accepted by the relay.
  */
 async function synchronizeRelayState(socket) {
-  const pending = [...terminalStates].map(([sessionId, state]) => ({
-    sessionId,
-    snapshot: state.snapshot(),
-  }));
-  // All output buffered before these boundaries is already represented by the
-  // snapshots. Output arriving after this point is buffered by relaySynchronizing.
-  offlineOutput.clear();
-
   try {
-    const snapshots = await Promise.all(pending.map(async (item) => ({
-      sessionId: item.sessionId,
-      snapshot: await item.snapshot,
-    })));
-    if (ws !== socket || !authenticated || socket.readyState !== WebSocket.OPEN) return;
-
-    for (const item of snapshots) {
-      const ok = send({
-        type: 'terminal_state',
+    while (ws === socket && authenticated && socket.readyState === WebSocket.OPEN) {
+      const pending = [...terminalStates].map(([sessionId, state]) => ({
+        sessionId,
+        snapshot: state.snapshot(),
+      }));
+      // 快照边界之前的输出已包含在快照中；边界之后的输出由
+      // relaySynchronizing 路径写入 offlineOutput。
+      offlineOutput.clear();
+      const snapshots = await Promise.all(pending.map(async (item) => ({
         sessionId: item.sessionId,
-        data: item.snapshot.data,
-        cols: item.snapshot.cols,
-        rows: item.snapshot.rows,
-        historyTruncated: item.snapshot.historyTruncated,
-      });
-      if (!ok) return;
+        snapshot: await item.snapshot,
+      })));
+      if (ws !== socket || !authenticated || socket.readyState !== WebSocket.OPEN) return;
+
+      for (const item of snapshots) {
+        const ok = send({
+          type: 'terminal_state',
+          sessionId: item.sessionId,
+          data: item.snapshot.data,
+          cols: item.snapshot.cols,
+          rows: item.snapshot.rows,
+          historyTruncated: item.snapshot.historyTruncated,
+        });
+        if (!ok) return;
+      }
+      if (offlineOutput.hasTruncatedOutput()) {
+        // 同步窗口内仍在高速刷屏且增量缓冲已裁剪：循环取更靠后的完整
+        // 状态，避免递归 Promise 链持续增长。
+        continue;
+      }
+      relaySynchronizing = false;
+      flushOfflineOutput();
+      return;
     }
-    if (offlineOutput.hasTruncatedOutput()) {
-      // 同步窗口内仍在高速刷屏且增量缓冲已裁剪：再取一个更靠后的完整
-      // 状态，绝不把从 ANSI 中间截断的尾部数据发给中继。
-      return synchronizeRelayState(socket);
-    }
-    relaySynchronizing = false;
-    flushOfflineOutput();
   } catch (err) {
     console.error('⚠  向中继同步终端状态失败:', err.message);
     try { socket.terminate(); } catch { /* ignore */ }
@@ -394,8 +465,19 @@ async function synchronizeRelayState(socket) {
 function handleMessage(data, socket) {
   switch (data.type) {
     case 'auth_ok':
+      if (authenticated) {
+        console.error('❌ Relay 重复发送了 Agent 鉴权响应');
+        try { socket.terminate(); } catch { /* ignore */ }
+        break;
+      }
+      if (data.role !== 'agent') {
+        console.error('❌ Relay 返回了无效的 Agent 鉴权响应');
+        try { socket.terminate(); } catch { /* ignore */ }
+        break;
+      }
       console.log('🤖 Agent 认证成功');
       authenticated = true;
+      reconnectAttempts = 0;
       relaySynchronizing = true;
       {
         const relayStateLimit = positiveInt(
@@ -407,8 +489,6 @@ function handleMessage(data, socket) {
         terminalStateBytes = relayStateLimit;
         for (const [, state] of terminalStates) state.maxSnapshotBytes = relayStateLimit;
       }
-      // 清理可能残留的异常状态会话，然后上报
-      sessionManager.cleanStaleSessions();
       reportSessions();
       void synchronizeRelayState(socket);
       break;
@@ -426,9 +506,11 @@ function handleMessage(data, socket) {
       }
       const session = sessionManager.getSession(data.sessionId);
       if (session && session.status === 'running') {
-        session.terminal.write(data.data);
-        // 审计日志：记录用户输入（仅 Enter 结束时写入完整命令行）
-        auditLog.feed(data.sessionId, session.title, data.data);
+        interactiveOutputPending.add(data.sessionId);
+        if (!session.terminal.write(data.data)) {
+          interactiveOutputPending.delete(data.sessionId);
+          send({ type: 'terminal_error', sessionId: data.sessionId, message: '终端输入写入失败' });
+        }
       } else {
         send({ type: 'terminal_error', sessionId: data.sessionId, message: '终端不存在或已退出，请重新创建会话' });
       }
@@ -441,8 +523,10 @@ function handleMessage(data, socket) {
       const session = sessionManager.getSession(data.sessionId);
       const cols = Math.max(2, Math.min(MAX_COLS, Number.parseInt(data.cols, 10) || 120));
       const rows = Math.max(2, Math.min(MAX_ROWS, Number.parseInt(data.rows, 10) || 30));
-      if (session) {
-        session.terminal.resize(cols, rows);
+      if (session && session.status === 'running') {
+        if (!session.terminal.resize(cols, rows)) {
+          send({ type: 'terminal_error', sessionId: data.sessionId, message: '终端尺寸调整失败' });
+        }
         const state = terminalStates.get(data.sessionId);
         if (state) state.resize(cols, rows).catch((err) => {
           console.warn(`⚠  本地终端状态 resize 失败 (${data.sessionId}):`, err.message);
@@ -459,8 +543,7 @@ function handleMessage(data, socket) {
       const forgetClosedTimer = setTimeout(() => closedTerminalIds.delete(closedSessionId), 10000);
       forgetClosedTimer.unref();
       dropOutputBuffer(data.sessionId);
-      auditLog.clearSession(data.sessionId);
-      sessionManager.deleteSession(data.sessionId, !!data.deleteFiles);
+      sessionManager.destroySession(data.sessionId);
       send({ type: 'terminal_closed', sessionId: data.sessionId });
       reportSessions();
       break;
@@ -471,18 +554,12 @@ function handleMessage(data, socket) {
       reportSessions();
       break;
 
-    // ── 旧聊天协议 ────────────────────────────────────────────
-    case 'chat':
-      if (ENABLE_LEGACY_CHAT) handleChatMessage(data);
-      else send({ type: 'terminal_error', sessionId: data.sessionId, message: '旧聊天协议未启用' });
-      break;
-
     case 'pong':
       lastPongAt = Date.now();
       break;
 
     default:
-      console.log('📩 未知消息类型:', data.type);
+      console.log('📩 未知消息类型:', sanitizeTitle(data.type));
   }
 }
 
@@ -537,128 +614,12 @@ function onTerminalCreate(data) {
   }
 }
 
-// ─── 旧聊天协议（claude -p, stream-json）─────────────────────────
-function handleChatMessage(data) {
-  const { sessionId, message } = data;
-  if (!sessionId || !message) return;
-
-  if (message.trim() === '/clear') {
-    if (chatProcesses.has(sessionId)) {
-      chatProcesses.get(sessionId).history = [];
-      chatProcesses.get(sessionId).queue = [];
-    }
-    send({ type: 'status', sessionId, status: 'done', message: 'Conversation cleared' });
-    return;
-  }
-
-  if (chatProcesses.has(sessionId) && chatProcesses.get(sessionId).proc) {
-    if (chatProcesses.get(sessionId).queue.length >= MAX_CHAT_QUEUE) {
-      send({ type: 'status', sessionId, status: 'error', message: 'Chat queue limit reached' });
-      return;
-    }
-    chatProcesses.get(sessionId).queue.push({ message });
-    return;
-  }
-  if (!chatProcesses.has(sessionId) && chatProcesses.size >= MAX_SESSIONS) {
-    send({ type: 'status', sessionId, status: 'error', message: 'Chat session limit reached' });
-    return;
-  }
-  runClaudeProcess(sessionId, message);
-}
-
-function runClaudeProcess(sessionId, message) {
-  if (!chatProcesses.has(sessionId)) {
-    chatProcesses.set(sessionId, { proc: null, queue: [], history: [] });
-  }
-  const session = chatProcesses.get(sessionId);
-  send({ type: 'status', sessionId, status: 'thinking' });
-
-  const args = ['-p', '--verbose', '--output-format', 'stream-json'];
-  if (LEGACY_CHAT_SKIP_PERMISSIONS) args.push('--dangerously-skip-permissions');
-
-  let prompt = message;
-  if (session.history.length > 0) {
-    const parts = ['Previous conversation:\n'];
-    for (const turn of session.history) {
-      parts.push(`User: ${turn.user}`);
-      if (turn.assistant) parts.push(`Assistant: ${turn.assistant}`);
-    }
-    parts.push('\n---\n', `User's latest message: ${message}`);
-    prompt = parts.join('\n');
-  }
-
-  const proc = spawn('claude', args, {
-    cwd: ROOT,
-    stdio: ['pipe', 'pipe', 'pipe'],
-    env: { ...process.env },
-  });
-  session.proc = proc;
-
-  let buffer = '';
-  let closed = false;
-  let lastResult = null;
-
-  function finalize(exitCode, isError, errorMsg) {
-    if (closed) return;
-    closed = true;
-    clearTimeout(timeout);
-
-    if (buffer.trim()) {
-      try {
-        const event = JSON.parse(buffer);
-        send({ type: 'stream', sessionId, event });
-        if (event.type === 'result' && event.result) lastResult = event.result;
-      } catch { /* ignore */ }
-    }
-
-    if (lastResult && !isError) {
-      session.history.push({ user: message, assistant: lastResult });
-      if (session.history.length > 50) session.history = session.history.slice(-50);
-    }
-
-    send({ type: 'status', sessionId, status: isError ? 'error' : 'done', exitCode, message: isError ? errorMsg : undefined });
-
-    session.proc = null;
-    if (session.queue.length > 0) {
-      const next = session.queue.shift();
-      setImmediate(() => runClaudeProcess(sessionId, next.message));
-    }
-  }
-
-  proc.stdout.on('data', (chunk) => {
-    buffer += chunk.toString();
-    const lines = buffer.split('\n');
-    buffer = lines.pop() || '';
-    for (const line of lines) {
-      if (!line.trim()) continue;
-      try {
-        const event = JSON.parse(line);
-        send({ type: 'stream', sessionId, event });
-        if (event.type === 'result' && event.result) lastResult = event.result;
-      } catch { /* non-JSON */ }
-    }
-  });
-  proc.stderr.on('data', (chunk) => console.error(`   📝 stderr: ${chunk.toString().trim()}`));
-  proc.on('close', (code) => finalize(code, false, null));
-  proc.on('error', (err) => finalize(-1, true, `Failed to start Claude: ${err.message}`));
-  proc.stdin.on('error', () => {});
-  proc.stdin.write(prompt + '\n');
-  proc.stdin.end();
-
-  const timeout = setTimeout(() => {
-    if (proc.exitCode === null) {
-      proc.kill('SIGTERM');
-      setTimeout(() => { if (proc.exitCode === null) proc.kill('SIGKILL'); }, 5000);
-    }
-  }, 5 * 60 * 1000);
-}
-
 // ─── 心跳 + 死连接检测 ──────────────────────────────────────────
 // half-open（半开）连接：TCP 一侧已死但本端 ws 不触发 close，导致永不重连。
 // 这里主动发心跳并校验 pong：若超过 PONG_TIMEOUT_MS 没收到任何 pong，
 // 判定连接已死，主动 terminate() 触发 close → 走正常重连流程（PTY 会话因进程
 // 存活而保留，重连后自动重新上报，无需重建）。
-setInterval(() => {
+const heartbeatTimer = setInterval(() => {
   if (!ws || ws.readyState !== WebSocket.OPEN) return;
 
   // 死连接判定：长时间没有任何 pong
@@ -676,19 +637,14 @@ setInterval(() => {
 }, HEARTBEAT_MS);
 
 // ─── 启动 ───────────────────────────────────────────────────────
-// 清理启动前可能残留的异常状态会话
-const cleaned = sessionManager.cleanStaleSessions();
-
 console.log('');
 console.log('╔══════════════════════════════════════════╗');
 console.log('║       Remote Terminal Agent 🤖           ║');
 console.log(`║  Server : ${displayUrl(SERVER_URL).slice(0, 32).padEnd(32)}║`);
 console.log('║  Mode   : 交互式终端 (node-pty)           ║');
 console.log(`║  Root   : ${ROOT.slice(0, 32).padEnd(32)}║`);
-console.log(`║  📝 审计 : ${auditLog.logPath().slice(0, 30).padEnd(30)}║`);
 console.log(`║  会话上限: ${String(MAX_SESSIONS).padEnd(29)}║`);
 if (proxyUrl) console.log(`║  代理   : ${String(proxyUrl.protocol + '//' + proxyUrl.host).slice(0, 32).padEnd(32)}║`);
-console.log(`║  🧹 清理 : ${String(cleaned + '个残留').padEnd(30)}║`);
 console.log('╚══════════════════════════════════════════╝');
 console.log('');
 
@@ -700,13 +656,21 @@ function shutdown() {
   shuttingDown = true;
   authenticated = false;
   console.log('\n🛑 正在关闭 Agent...');
+  clearInterval(heartbeatTimer);
   if (reconnectTimer) clearTimeout(reconnectTimer);
+  for (const [, buffer] of outBuffers) if (buffer.timer) clearTimeout(buffer.timer);
+  outBuffers.clear();
+  offlineOutput.clear();
   sessionManager.destroyAllSessions();
   for (const [, state] of terminalStates) state.dispose();
   terminalStates.clear();
-  for (const [, s] of chatProcesses) if (s.proc) s.proc.kill('SIGTERM');
-  if (ws) ws.close(1000, 'Agent shutting down');
-  process.exit(0);
+  if (ws && ws.readyState !== WebSocket.CLOSED) {
+    try { ws.close(1000, 'Agent shutting down'); } catch { /* ignore */ }
+  }
+  setTimeout(() => {
+    try { ws?.terminate(); } catch { /* ignore */ }
+    process.exit(0);
+  }, 4000);
 }
 process.on('SIGINT', shutdown);
 process.on('SIGTERM', shutdown);

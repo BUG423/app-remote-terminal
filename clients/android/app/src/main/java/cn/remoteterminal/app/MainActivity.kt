@@ -52,10 +52,15 @@ private class SecureTokenStore(private val context: Context) {
     }
 
     private fun validCredentialId(value: String): Boolean =
-        value.matches(Regex("^[A-Za-z0-9._:-]{1,128}$"))
+        value !in setOf("__proto__", "prototype", "constructor") &&
+            value.matches(Regex("^[A-Za-z0-9._:-]{1,128}$"))
+
+    private fun validToken(value: String): Boolean =
+        value.length in 32..512 && value.toByteArray(Charsets.UTF_8).size <= 1024 &&
+            !value.contains(Regex("change-me|deprecated|your-token|shared-secret", RegexOption.IGNORE_CASE))
 
     private fun writeValues(ciphertextKey: String, ivKey: String, token: String): Boolean {
-        if (token.length > 4096) return false
+        if (!validToken(token)) return false
         val cipher = Cipher.getInstance("AES/GCM/NoPadding").apply { init(Cipher.ENCRYPT_MODE, key()) }
         return preferences.edit()
             .putString(ciphertextKey, Base64.encodeToString(cipher.doFinal(token.toByteArray(Charsets.UTF_8)), Base64.NO_WRAP))
@@ -70,7 +75,13 @@ private class SecureTokenStore(private val context: Context) {
             val cipher = Cipher.getInstance("AES/GCM/NoPadding").apply {
                 init(Cipher.DECRYPT_MODE, key(), GCMParameterSpec(128, Base64.decode(iv, Base64.NO_WRAP)))
             }
-            String(cipher.doFinal(Base64.decode(ciphertext, Base64.NO_WRAP)), Charsets.UTF_8)
+            val token = String(cipher.doFinal(Base64.decode(ciphertext, Base64.NO_WRAP)), Charsets.UTF_8)
+            if (!validToken(token)) {
+                preferences.edit().remove(ciphertextKey).remove(ivKey).apply()
+                ""
+            } else {
+                token
+            }
         } catch (_: Exception) {
             preferences.edit().remove(ciphertextKey).remove(ivKey).apply()
             ""
@@ -172,6 +183,7 @@ class MainActivity : Activity() {
     private var lastImeBottom = -1
 
     @SuppressLint("SetJavaScriptEnabled")
+    @Suppress("DEPRECATION")
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         WebView.setWebContentsDebuggingEnabled(BuildConfig.DEBUG)
@@ -184,15 +196,31 @@ class MainActivity : Activity() {
             settings.javaScriptEnabled = true
             settings.domStorageEnabled = true
             settings.setSupportZoom(false)
+            settings.builtInZoomControls = false
+            settings.displayZoomControls = false
             settings.allowContentAccess = false
+            settings.allowFileAccess = true
+            settings.allowFileAccessFromFileURLs = false
+            settings.allowUniversalAccessFromFileURLs = false
             settings.mixedContentMode = WebSettings.MIXED_CONTENT_NEVER_ALLOW
             settings.javaScriptCanOpenWindowsAutomatically = false
+            settings.setSupportMultipleWindows(false)
+            settings.databaseEnabled = false
+            settings.setGeolocationEnabled(false)
+            settings.mediaPlaybackRequiresUserGesture = true
+            settings.cacheMode = WebSettings.LOAD_NO_CACHE
+            settings.safeBrowsingEnabled = true
+            @Suppress("DEPRECATION")
+            settings.saveFormData = false
             CookieManager.getInstance().setAcceptCookie(false)
             CookieManager.getInstance().setAcceptThirdPartyCookies(this, false)
             addJavascriptInterface(NativeBridge(this@MainActivity, rootView, this), "RemoteTerminalNative")
             webViewClient = object : WebViewClient() {
                 override fun shouldOverrideUrlLoading(view: WebView, request: WebResourceRequest): Boolean {
-                    return !request.url.toString().startsWith("file:///android_asset/www/")
+                    return request.url.scheme != "file" ||
+                        !request.url.authority.isNullOrEmpty() ||
+                        request.url.path != "/android_asset/www/index.html" ||
+                        request.url.query != null
                 }
 
                 override fun onRenderProcessGone(view: WebView, detail: RenderProcessGoneDetail): Boolean {
@@ -204,9 +232,7 @@ class MainActivity : Activity() {
                     return true
                 }
             }
-            if (savedInstanceState == null || restoreState(savedInstanceState) == null) {
-                loadUrl("file:///android_asset/www/index.html")
-            }
+            loadUrl("file:///android_asset/www/index.html")
         }
         rootView.addView(
             webView,
@@ -262,6 +288,7 @@ class MainActivity : Activity() {
             predictiveBackCallback?.let(onBackInvokedDispatcher::unregisterOnBackInvokedCallback)
             predictiveBackCallback = null
         }
+        webView.removeJavascriptInterface("RemoteTerminalNative")
         webView.destroy()
         super.onDestroy()
     }
@@ -280,11 +307,6 @@ class MainActivity : Activity() {
                 null,
             )
         }
-    }
-
-    override fun onSaveInstanceState(outState: Bundle) {
-        webView.saveState(outState)
-        super.onSaveInstanceState(outState)
     }
 
     private fun handleBackRequest() {

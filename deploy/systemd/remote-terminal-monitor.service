@@ -12,17 +12,17 @@ Environment=NODE_ENV=production
 Environment=RT_MONITOR_CONFIG=/etc/remote-terminal/server.json
 Environment=RT_MONITOR_STATE=/var/lib/remote-terminal-monitor/status.json
 Environment=RT_MONITOR_AUTO_HEAL=0
-Environment=RT_MONITOR_ENFORCE_NO_AGENT=0
 EnvironmentFile=-/etc/remote-terminal/monitor.env
 ExecStart=/usr/bin/node /opt/remote-terminal/scripts/monitor-server.js
 TimeoutStartSec=45s
-UMask=0027
+UMask=0077
 StateDirectory=remote-terminal-monitor
-StateDirectoryMode=0750
+StateDirectoryMode=0700
 
 NoNewPrivileges=true
-CapabilityBoundingSet=CAP_DAC_READ_SEARCH CAP_KILL CAP_SYS_PTRACE
+CapabilityBoundingSet=CAP_DAC_READ_SEARCH
 LockPersonality=true
+PrivateDevices=true
 PrivateTmp=true
 ProtectClock=true
 ProtectControlGroups=true
@@ -33,6 +33,8 @@ ProtectKernelModules=true
 ProtectKernelTunables=true
 ProtectSystem=strict
 ReadWritePaths=/var/lib/remote-terminal-monitor
+RemoveIPC=true
+RestrictNamespaces=true
 RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
 RestrictRealtime=true
 RestrictSUIDSGID=true

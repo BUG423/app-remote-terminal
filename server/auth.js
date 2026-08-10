@@ -1,160 +1,96 @@
 'use strict';
 
-const crypto = require('crypto');
+const crypto = require('node:crypto');
 
-const sha256 = (value) => crypto.createHash('sha256').update(String(value)).digest();
-const sha256hex = (value) => sha256(value).toString('hex');
-const isValidToken = (token) => typeof token === 'string' &&
-  token.length >= 32 && token.length <= 512 &&
-  !/change-me|deprecated|your-token|shared-secret/i.test(token);
+const MIN_TOKEN_LENGTH = 32;
+const MAX_TOKEN_LENGTH = 512;
+const MAX_TOKEN_BYTES = 1024;
 
-/**
- * Recommended configuration:
- * {
- *   "devices": {
- *     "production-a": {
- *       "name": "Production A",
- *       "browserToken": "...",
- *       "agentToken": "...different secret..."
- *     }
- *   }
- * }
- *
- * Legacy `tokens` and `token` values remain accepted for migration. A legacy
- * token is intentionally valid for both roles and therefore offers weaker
- * Agent identity protection.
- */
+function tokenShapeIsValid(token) {
+  return typeof token === 'string' &&
+    token.length >= MIN_TOKEN_LENGTH && token.length <= MAX_TOKEN_LENGTH &&
+    Buffer.byteLength(token, 'utf8') <= MAX_TOKEN_BYTES;
+}
+
+function configuredTokenIsValid(token) {
+  return tokenShapeIsValid(token) &&
+    !/change-me|deprecated|your-token|shared-secret/i.test(token);
+}
+
+function cleanLabel(value, fallback) {
+  const label = String(value || fallback || 'unknown')
+    .replace(/[\x00-\x1F\x7F-\x9F]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+  return (label || fallback || 'unknown').slice(0, 120);
+}
+
+const digest = (value) => crypto.createHash('sha256').update(value, 'utf8').digest();
+const digestHex = (value) => digest(value).toString('hex');
+
 function createAuthMiddleware(config) {
-  /** @type {Map<string, {name:string, token:string, routingKey:string, roles:Set<string>}>} */
-  const credentials = new Map();
-  /** @type {Map<string, string>} */
-  const routeNames = new Map();
-  let deviceCredentials = 0;
-  let legacyCredentials = 0;
-
-  function addCredential(token, name, routingKey, role) {
-    if (!isValidToken(token)) return false;
-    const digest = sha256hex(token);
-    const existing = credentials.get(digest);
-    if (existing) {
-      if (existing.token !== token || existing.routingKey !== routingKey) {
-        console.error('❌ 检测到重复凭据被分配给不同设备，已拒绝该配置项');
-        return false;
-      }
-      existing.roles.add(role);
-      return true;
-    }
-    credentials.set(digest, {
-      name: String(name || 'unknown').slice(0, 120),
-      token,
-      routingKey,
-      roles: new Set([role]),
-    });
-    routeNames.set(routingKey, String(name || 'unknown').slice(0, 120));
-    return true;
-  }
-
   const devices = config.devices;
-  if (devices && typeof devices === 'object' && !Array.isArray(devices)) {
-    for (const [deviceId, device] of Object.entries(devices)) {
-      if (!/^[A-Za-z0-9._-]{1,64}$/.test(deviceId) || !device || typeof device !== 'object') {
-        console.warn(`⚠  忽略无效设备配置: ${String(deviceId).slice(0, 32)}`);
-        continue;
-      }
-      const browserToken = device.browserToken;
-      const agentToken = device.agentToken;
-      if (!isValidToken(browserToken) || !isValidToken(agentToken) || browserToken === agentToken) {
-        console.warn(`⚠  忽略设备 ${deviceId}：browserToken/agentToken 必须有效且彼此不同`);
-        continue;
-      }
-      if (credentials.has(sha256hex(browserToken)) || credentials.has(sha256hex(agentToken))) {
-        console.warn(`⚠  忽略设备 ${deviceId}：凭据已被其他设备使用`);
-        continue;
-      }
+  if (!devices || typeof devices !== 'object' || Array.isArray(devices)) {
+    throw new Error('devices must be a non-empty object with role-separated credentials');
+  }
 
-      const routingKey = sha256hex(`device:${deviceId}`);
-      const name = device.name || deviceId;
-      const browserAdded = addCredential(browserToken, name, routingKey, 'browser');
-      const agentAdded = addCredential(agentToken, name, routingKey, 'agent');
-      if (browserAdded && agentAdded) deviceCredentials++;
+  /** @type {Map<string, {name:string, digest:Buffer, routingKey:string, role:string}>} */
+  const credentials = new Map();
+  const routes = new Set();
+
+  for (const [deviceId, device] of Object.entries(devices)) {
+    if (!/^[A-Za-z0-9._-]{1,64}$/.test(deviceId)) {
+      throw new Error(`invalid device id: ${cleanLabel(deviceId, 'unknown')}`);
     }
-  }
-
-  const legacyTokens = config.tokens;
-  if (legacyTokens && typeof legacyTokens === 'object' && !Array.isArray(legacyTokens)) {
-    for (const [token, name] of Object.entries(legacyTokens)) {
-      if (!isValidToken(token)) {
-        console.warn(`⚠  旧 Token 被忽略（长度无效或仍为示例值）: "${String(token).slice(0, 8)}..."`);
-        continue;
-      }
-      const routingKey = sha256hex(`legacy:${token}`);
-      if (addCredential(token, name, routingKey, 'browser') &&
-          addCredential(token, name, routingKey, 'agent')) {
-        legacyCredentials++;
-      }
+    if (!device || typeof device !== 'object' || Array.isArray(device)) {
+      throw new Error(`device ${deviceId} must be an object`);
     }
-  }
 
-  const legacyToken = config.token;
-  if (legacyToken) {
-    if (!isValidToken(legacyToken)) {
-      console.error('❌ 旧单 Token 无效：必须为 32-512 个字符且不能使用示例值');
-    } else {
-      const routingKey = sha256hex(`legacy:${legacyToken}`);
-      if (addCredential(legacyToken, 'default', routingKey, 'browser') &&
-          addCredential(legacyToken, 'default', routingKey, 'agent')) {
-        legacyCredentials++;
-      }
+    const browserToken = device.browserToken;
+    const agentToken = device.agentToken;
+    if (!configuredTokenIsValid(browserToken) || !configuredTokenIsValid(agentToken)) {
+      throw new Error(`device ${deviceId} tokens must be 32-512 characters and not use example values`);
     }
+    if (browserToken === agentToken) {
+      throw new Error(`device ${deviceId} must use different browser and Agent tokens`);
+    }
+
+    const browserKey = digestHex(browserToken);
+    const agentKey = digestHex(agentToken);
+    if (credentials.has(browserKey) || credentials.has(agentKey)) {
+      throw new Error(`device ${deviceId} reuses a credential assigned to another device`);
+    }
+
+    const routingKey = digestHex(`device:${deviceId}`);
+    const name = cleanLabel(device.name, deviceId);
+    credentials.set(browserKey, { name, digest: digest(browserToken), routingKey, role: 'browser' });
+    credentials.set(agentKey, { name, digest: digest(agentToken), routingKey, role: 'agent' });
+    routes.add(routingKey);
   }
 
-  if (credentials.size === 0) {
-    console.error('❌ 未配置任何有效凭据！推荐在 config.json 中设置 devices。');
-    console.error('   生成强 Token: node -e "console.log(require(\'crypto\').randomBytes(32).toString(\'base64url\'))"');
-    process.exit(1);
+  if (routes.size === 0) {
+    throw new Error('devices must contain at least one valid device');
   }
-
-  const mode = deviceCredentials > 0
-    ? (legacyCredentials > 0 ? 'mixed' : 'devices')
-    : 'legacy';
 
   return {
     verify(providedToken, role) {
-      if (!providedToken || typeof providedToken !== 'string' || !['browser', 'agent'].includes(role)) {
+      if (!tokenShapeIsValid(providedToken) || !['browser', 'agent'].includes(role)) {
         return { valid: false };
       }
-      const entry = credentials.get(sha256hex(providedToken));
-      if (!entry) return { valid: false };
-
-      const provided = Buffer.from(providedToken);
-      const expected = Buffer.from(entry.token);
-      if (provided.length !== expected.length || !crypto.timingSafeEqual(provided, expected)) {
+      const providedDigest = digest(providedToken);
+      const entry = credentials.get(providedDigest.toString('hex'));
+      if (!entry || entry.role !== role || !crypto.timingSafeEqual(providedDigest, entry.digest)) {
         return { valid: false };
       }
-      if (!entry.roles.has(role)) return { valid: false };
-
-      return {
-        valid: true,
-        name: entry.name,
-        routingKey: entry.routingKey,
-      };
-    },
-
-    getName(providedToken) {
-      const entry = credentials.get(sha256hex(providedToken || ''));
-      return entry ? entry.name : 'unknown';
-    },
-
-    listTokens() {
-      return [...routeNames.values()];
+      return { valid: true, name: entry.name, routingKey: entry.routingKey };
     },
 
     get tokenCount() {
-      return routeNames.size;
+      return routes.size;
     },
 
     get mode() {
-      return mode;
+      return 'devices';
     },
 
     generateSessionId() {
@@ -163,4 +99,8 @@ function createAuthMiddleware(config) {
   };
 }
 
-module.exports = { createAuthMiddleware };
+module.exports = {
+  createAuthMiddleware,
+  configuredTokenIsValid,
+  tokenShapeIsValid,
+};

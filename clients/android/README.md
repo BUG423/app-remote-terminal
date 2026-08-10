@@ -1,6 +1,6 @@
 # Remote Terminal Android
 
-Android 客户端在构建时把通用终端 UI 和 xterm 打进 APK，首次打开直接进入“设备”页，运行时只连接用户添加的阿里云 HTTPS/WSS 中转地址。每台设备的 Token 使用 Android Keystore 加密保存。
+Android 客户端在构建时把通用终端 UI 和 xterm 打进 APK，首次打开直接进入“设备”页，运行时只连接用户添加的阿里云 WSS 中转地址。每台设备的 Token 使用 Android Keystore 加密保存；应用关闭备份、明文网络、跨文件来源访问和 WebView 调试（Release）。
 
 构建要求：JDK 17、Android SDK Platform 35、Build Tools 35.0.0。
 

@@ -6,6 +6,7 @@ const https = require('node:https');
 const os = require('node:os');
 const path = require('node:path');
 const { spawn, spawnSync } = require('node:child_process');
+const { pinnedLocalTlsOptions } = require('../scripts/monitor-server');
 const WebSocket = require('../server/node_modules/ws');
 
 const root = path.join(__dirname, '..');
@@ -19,11 +20,12 @@ const agentToken = `agent-${'a'.repeat(40)}`;
 const debug = process.env.DEBUG_TLS_TEST === '1';
 let server;
 let serverLog = '';
+let tlsOptions;
 
 function request(pathname) {
   return new Promise((resolve, reject) => {
     const req = https.get({
-      hostname: '127.0.0.1', port, path: pathname, rejectUnauthorized: false,
+      hostname: '127.0.0.1', port, path: pathname, ...tlsOptions,
     }, (res) => {
       const chunks = [];
       res.on('data', (chunk) => chunks.push(chunk));
@@ -52,7 +54,7 @@ async function waitForHealth() {
 
 function authenticate() {
   return new Promise((resolve, reject) => {
-    const ws = new WebSocket(`wss://127.0.0.1:${port}`, { rejectUnauthorized: false });
+    const ws = new WebSocket(`wss://127.0.0.1:${port}`, tlsOptions);
     const timer = setTimeout(() => reject(new Error('WSS auth timeout')), 5000);
     ws.on('open', () => ws.send(JSON.stringify({
       type: 'auth', role: 'browser', token: browserToken, protocolVersion: 2,
@@ -79,16 +81,16 @@ function authenticate() {
       '-subj', '/CN=localhost', '-addext', 'subjectAltName=DNS:localhost,IP:127.0.0.1',
     ], { encoding: 'utf8' });
     assert.equal(generated.status, 0, generated.stderr);
+    tlsOptions = pinnedLocalTlsOptions({ tlsCertPath: cert });
 
     fs.writeFileSync(configPath, JSON.stringify({
       port,
       bindHost: '127.0.0.1',
       useTLS: true,
-      enableHttpRedirect: false,
       tlsCertPath: cert,
       tlsKeyPath: key,
       devices: { test: { name: 'test', browserToken, agentToken } },
-    }));
+    }), { mode: 0o600 });
 
     server = spawn(process.execPath, ['server/index.js'], {
       cwd: root,

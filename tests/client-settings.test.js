@@ -14,7 +14,7 @@ assert.deepEqual(sanitize({
   fontSize: 999,
   scrollback: -1,
   cursorBlink: false,
-  pinnedSessionIds: ['a', 'a', 1, 'b'],
+  pinnedSessionIds: ['a', 'a', 1, 'b', '../bad', 'x'.repeat(300)],
 }), {
   ...DEFAULTS,
   fontSize: 24,

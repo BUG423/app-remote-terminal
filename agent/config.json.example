@@ -1,0 +1,24 @@
+{
+  "_comment": "Remote Terminal Agent 配置；复制为 config.json，并执行 chmod 600 config.json",
+  "agentToken": "change-me-agent-random-token-02",
+  "serverUrl": "wss://terminal.example.com",
+  "requiredUser": "replace-with-current-user",
+  "requiredUid": 1000,
+  "requiredHome": "/home/replace-with-current-user",
+  "requiredWorkingDirectory": "/absolute/path/to/existing/current/workspace",
+
+  "maxSessions": 12,
+  "offlineOutputBytes": 524288,
+  "maxWsBufferedBytes": 2097152,
+  "maxPayloadBytes": 1048576,
+  "outputFlushMs": 4,
+  "connectTimeoutMs": 15000,
+  "authTimeoutMs": 15000,
+  "heartbeatMs": 25000,
+  "pongTimeoutMs": 70000,
+
+  "proxyUrl": "",
+  "noProxy": "localhost,127.0.0.1,::1",
+  "tlsCaPath": "",
+  "_security_comment": "Agent 只允许使用这里明确绑定的当前用户、UID、HOME 和既有工作目录；不会创建用户或工作目录。outputFlushMs 只用于连续大输出合并，用户输入后的首段回显会立即发送"
+}

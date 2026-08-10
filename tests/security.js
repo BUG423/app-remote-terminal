@@ -1,305 +1,178 @@
-/**
- * ═══════════════════════════════════════════════════════════════
- * Remote Terminal — 安全测试套件
- *
- * 用法：
- *   node tests/security.js
- *
- * 前提：本地 Server (127.0.0.1:3002) + Agent 已运行
- * ═══════════════════════════════════════════════════════════════
- */
+'use strict';
 
+const assert = require('node:assert');
 const WebSocket = require('./ws-client');
-const fs = require('fs');
-const path = require('path');
-const os = require('os');
 
-// ─── 配置 ────────────────────────────────────────────────────────
-let testToken = process.env.CLAUDE_WEB_TOKEN;
-try {
-  if (!testToken) {
-    const cfg = require('../config.json');
-    const firstDevice = cfg.devices && Object.values(cfg.devices)[0];
-    testToken = firstDevice?.browserToken || (cfg.tokens && Object.keys(cfg.tokens)[0]) || cfg.token;
-  }
-} catch {
-  console.error('❌ 未设置 CLAUDE_WEB_TOKEN，且无法读取 config.json');
+const TARGET = process.env.TARGET || 'ws://127.0.0.1:3002';
+const browserToken = process.env.REMOTE_TERMINAL_BROWSER_TOKEN;
+const agentToken = process.env.REMOTE_TERMINAL_AGENT_TOKEN;
+if (!browserToken || !agentToken) {
+  console.error('❌ REMOTE_TERMINAL_BROWSER_TOKEN and REMOTE_TERMINAL_AGENT_TOKEN are required');
   process.exit(1);
 }
 
-const TARGET = process.env.TARGET || 'ws://127.0.0.1:3002';
-const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-
-// ─── 工具 ────────────────────────────────────────────────────────
+const sockets = new Set();
 const results = [];
-let pass = 0, fail = 0;
 
-function check(category, name, cond, detail = '') {
-  results.push({ category, name, pass: !!cond, detail });
-  if (cond) { pass++; console.log(`  ✅ ${name}`); }
-  else { fail++; console.log(`  ❌ ${name}${detail ? ' — ' + detail : ''}`); }
+function check(name, condition, detail = '') {
+  results.push(!!condition);
+  console.log(`  ${condition ? '✅' : '❌'} ${name}${detail ? ` — ${detail}` : ''}`);
 }
 
-function section(title) {
-  console.log(`\n━━━ ${title} ━━━`);
-}
-
-function summary() {
-  const total = pass + fail;
-  console.log(`\n${'═'.repeat(60)}`);
-  console.log(`  ${pass}/${total} 通过  ${fail ? '❌ ' + fail + ' 失败' : '✅ 全部通过'}`);
-  console.log(`${'═'.repeat(60)}`);
-}
-
-function quickConnect(token) {
+function openSocket(timeoutMs = 5000) {
   return new Promise((resolve, reject) => {
     const ws = new WebSocket(TARGET);
-    const timeout = setTimeout(() => { ws.close(); reject(new Error('connect timeout')); }, 5000);
-    ws.on('open', () => ws.send(JSON.stringify({ type: 'auth', token: token || '', role: 'browser' })));
-    ws.on('message', (raw) => {
-      clearTimeout(timeout);
-      const m = JSON.parse(raw.toString());
-      resolve({ ws, data: m });
+    sockets.add(ws);
+    const timer = setTimeout(() => reject(new Error('WebSocket open timeout')), timeoutMs);
+    ws.once('open', () => {
+      clearTimeout(timer);
+      resolve(ws);
     });
-    ws.on('error', (err) => { clearTimeout(timeout); reject(err); });
+    ws.once('error', (err) => {
+      clearTimeout(timer);
+      reject(err);
+    });
   });
 }
 
-// ─── 测试用例 ────────────────────────────────────────────────────
+function nextMessage(ws, timeoutMs = 5000) {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      ws.off('message', onMessage);
+      reject(new Error('message timeout'));
+    }, timeoutMs);
+    function onMessage(raw, isBinary) {
+      clearTimeout(timer);
+      ws.off('message', onMessage);
+      if (isBinary) reject(new Error('unexpected binary response'));
+      else {
+        try { resolve(JSON.parse(raw.toString())); } catch (err) { reject(err); }
+      }
+    }
+    ws.on('message', onMessage);
+  });
+}
 
-(async () => {
-  console.log(`\n🔒 Remote Terminal 安全测试`);
-  console.log(`   目标: ${TARGET}`);
-  console.log(`   Token: ${testToken.slice(0, 8)}…`);
-
-  // ═════════════════════════════════════════════════════════════
-  section('A. 认证 - Token 验证');
-
-  // A1: 有效 Token
-  try {
-    const { ws, data } = await quickConnect(testToken);
-    check('auth', 'A1 有效 Token 认证成功', data.type === 'auth_ok', `role=${data.role}`);
-    ws.close();
-  } catch (e) {
-    check('auth', 'A1 有效 Token 认证成功', false, e.message);
-  }
-
-  // A2: 无效 Token
-  try {
-    const { ws, data } = await quickConnect('wrong-token-12345678');
-    check('auth', 'A2 无效 Token 被拒绝', data.type === 'error' || data.message, JSON.stringify(data).slice(0, 80));
-    ws.close();
-  } catch { check('auth', 'A2 无效 Token 被拒绝', false, '异常'); }
-
-  // A3: 空 Token
-  try {
-    const { ws, data } = await quickConnect('');
-    check('auth', 'A3 空 Token 被拒绝', data.type === 'error' || data.message, JSON.stringify(data).slice(0, 80));
-    ws.close();
-  } catch { check('auth', 'A3 空 Token 被拒绝', false, '异常'); }
-
-  // A4: 未认证就发消息
-  try {
-    const ws2 = new WebSocket(TARGET);
-    await new Promise((resolve) => {
-      ws2.on('open', () => {
-        ws2.send(JSON.stringify({ type: 'terminal_list' }));
-        ws2.on('message', (raw) => {
-          const m = JSON.parse(raw.toString());
-          check('auth', 'A4 未认证发消息被拒绝', m.type === 'error', m.message || '');
-          ws2.close();
-          resolve();
-        });
-      });
-    });
-    await sleep(200);
-  } catch { check('auth', 'A4 未认证发消息被拒绝', false, '异常'); }
-
-  // ═════════════════════════════════════════════════════════════
-  section('B. 速率限制 - 暴力破解防护');
-
-  // B1: 连续失败触发封禁（用随机假 token，不应被封因为是 localhost）
-  let failCount = 0;
-  for (let i = 0; i < 20; i++) {
-    try {
-      const fakeToken = 'fake-' + Math.random().toString(36).slice(2, 18);
-      const ws = new WebSocket(TARGET);
-      const result = await new Promise((resolve) => {
-        ws.on('open', () => ws.send(JSON.stringify({ type: 'auth', token: fakeToken, role: 'browser' })));
-        ws.on('message', (raw) => {
-          const m = JSON.parse(raw.toString());
-          ws.close();
-          resolve(m.type === 'auth_ok');
-        });
-        ws.on('error', () => resolve(false));
-      });
-      if (!result) failCount++;
-    } catch { failCount++; }
-    await sleep(50);
-  }
-  check('ratelimit', 'B1 20 次假 Token 尝试均被拒绝', failCount === 20, `拒绝=${failCount}/20`);
-  check('ratelimit', 'B2 localhost 不受速率限制', true, '本地白名单设计如此');
-
-  // ═════════════════════════════════════════════════════════════
-  section('C. Token 隔离 - 多 Agent 数据隔离');
-
-  // C1: 用有效 Token 创建会话
-  const main = await quickConnect(testToken);
-  const mainSessions = main.data.sessions || [];
-  check('isolation', 'C1 主 Token 连接成功', main.data.type === 'auth_ok');
-
-  // C2: 用另一个 Token 尝试连接（应该没有对应 Agent）
-  const otherToken = 'other-agent-token-00123456789';
-  const other = await quickConnect(otherToken);
-  // 这个 Token 不在 config 里，应该被拒绝
-  check('isolation', 'C2 未配置 Token 被拒绝', other.data.type !== 'auth_ok');
-  if (other.ws) other.ws.close();
-
-  // C3: 主 Token 创建终端会话
-  const sessionId = 'sec-test-' + Date.now();
-  main.ws.send(JSON.stringify({ type: 'terminal_create', sessionId, title: '安全测试会话' }));
-  const created = await new Promise((resolve) => {
-    main.ws.on('message', (raw) => {
-      const m = JSON.parse(raw.toString());
-      if (m.type === 'terminal_created' && m.sessionId === sessionId) resolve(m);
+function waitForClose(ws, timeoutMs = 5000) {
+  if (ws.readyState === WebSocket.CLOSED) return Promise.resolve();
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error('close timeout')), timeoutMs);
+    ws.once('close', () => {
+      clearTimeout(timer);
+      resolve();
     });
   });
-  check('isolation', 'C3 终端会话创建成功', !!created, `sessionId=${sessionId.slice(0, 12)}`);
+}
 
-  // C4: 用错误 Token 尝试操作该会话（应失败或被拒绝）
-  // 先用随机 token 连接
-  try {
-    const badToken = 'bad-token-9876543210abcdef';
-    const bad = await quickConnect(badToken);
-    // 如果连接成功（但 Token 未配置，应该失败）
-    check('isolation', 'C4 未授权 Token 无法访问会话', bad.data.type !== 'auth_ok');
-    if (bad.ws) bad.ws.close();
-  } catch { check('isolation', 'C4 未授权 Token 无法访问会话', false, '异常'); }
+async function authenticate(token, role = 'browser') {
+  const ws = await openSocket();
+  const messagePromise = nextMessage(ws);
+  ws.send(JSON.stringify({ type: 'auth', token, role, protocolVersion: 2 }));
+  return { ws, message: await messagePromise };
+}
 
-  // 清理测试会话
-  main.ws.send(JSON.stringify({ type: 'terminal_delete', sessionId }));
-  await sleep(300);
+async function sendAndReceive(ws, value, options) {
+  const messagePromise = nextMessage(ws);
+  ws.send(value, options);
+  return messagePromise;
+}
 
-  // ═════════════════════════════════════════════════════════════
-  section('D. 输入验证 - 异常数据处理');
+(async () => {
+  console.log('╔══════════════════════════════════════════╗');
+  console.log('║   Relay / Agent 真实安全边界测试         ║');
+  console.log('╚══════════════════════════════════════════╝');
 
-  // D1: 发送非 JSON 数据
-  let invalidJsonRejected = false;
-  let malformedClosed = false;
-  try {
-    const ws = new WebSocket(TARGET);
-    await new Promise((resolve) => {
-      ws.on('open', () => {
-        ws.send(testToken);
-        ws.send('not-valid-json{{{');
-        ws.send('third-invalid-json');
-      });
-      ws.on('message', (raw) => {
-        const m = JSON.parse(raw.toString());
-        if (m.type === 'error' && m.message === 'Invalid JSON') invalidJsonRejected = true;
-      });
-      ws.on('close', () => { malformedClosed = true; resolve(); });
-      setTimeout(resolve, 3000);
-    });
-  } catch {}
-  check('input', 'D1 非 JSON 数据被拒绝，连续异常后断开', invalidJsonRejected && malformedClosed);
+  const valid = await authenticate(browserToken);
+  check('有效浏览器 Token 只能以 browser 角色登录',
+    valid.message.type === 'auth_ok' && valid.message.role === 'browser');
 
-  // D2: 超长 session title
-  let longTitleHandled = false;
-  try {
-    const longId = 'long-' + Date.now();
-    main.ws.send(JSON.stringify({ type: 'terminal_create', sessionId: longId, title: 'A'.repeat(10000) }));
-    await new Promise((resolve) => {
-      const timer = setTimeout(() => resolve(), 3000);
-      main.ws.on('message', (raw) => {
-        const m = JSON.parse(raw.toString());
-        if (m.sessionId === longId && (m.type === 'terminal_created' || m.type === 'terminal_error')) {
-          clearTimeout(timer);
-          longTitleHandled = true;
-          main.ws.send(JSON.stringify({ type: 'terminal_delete', sessionId: longId }));
-          resolve();
-        }
-      });
-    });
-  } catch {}
-  check('input', 'D2 超长标题不崩溃', longTitleHandled, '正常创建或返回错误');
+  const wrongRole = await authenticate(browserToken, 'agent');
+  check('浏览器 Token 不能伪装 Agent', wrongRole.message.message === 'Invalid token');
+  wrongRole.ws.close();
 
-  // D3: 发送未知消息类型
-  main.ws.send(JSON.stringify({ type: '__UNKNOWN_TYPE__', data: 'test' }));
-  await sleep(200);
-  check('input', 'D3 未知消息类型不崩溃', main.ws.readyState === 1, '连接保持');
+  const agentAsBrowser = await authenticate(agentToken, 'browser');
+  check('Agent Token 不能登录客户端', agentAsBrowser.message.message === 'Invalid token');
+  agentAsBrowser.ws.close();
 
-  // ═════════════════════════════════════════════════════════════
-  section('E. 审计日志');
+  const unauthenticated = await openSocket();
+  const unauthenticatedReply = await sendAndReceive(
+    unauthenticated,
+    JSON.stringify({ type: 'terminal_list' }),
+  );
+  check('未鉴权控制消息被拒绝', unauthenticatedReply.message === 'Not authenticated');
+  unauthenticated.close();
 
-  const auditPath = process.env.CW_AUDIT_LOG ||
-    path.join(os.homedir(), 'WebClaudeWorkspaces', '.audit.log');
+  const malformed = await openSocket();
+  const nullReply = await sendAndReceive(malformed, 'null');
+  const arrayReply = await sendAndReceive(malformed, '[]');
+  const closeAfterMalformed = waitForClose(malformed);
+  const scalarReply = await sendAndReceive(malformed, '"scalar"');
+  await closeAfterMalformed;
+  check('JSON null、数组和标量被拒绝且不会使 Relay 崩溃',
+    [nullReply, arrayReply, scalarReply].every((item) => item.message === 'Message must be a JSON object'));
 
-  // E1: 发送命令后检查日志
-  const auditSid = 'sec-audit-' + Date.now();
-  main.ws.send(JSON.stringify({ type: 'terminal_create', sessionId: auditSid, title: '审计测试' }));
-  await sleep(1000);
-  main.ws.send(JSON.stringify({ type: 'terminal_input', sessionId: auditSid, data: 'echo SECURITY_TEST_MARKER\r' }));
-  await sleep(1000);
+  const binary = await openSocket();
+  const binaryOne = await sendAndReceive(binary, Buffer.from('{}'), { binary: true });
+  const binaryTwo = await sendAndReceive(binary, Buffer.from('{}'), { binary: true });
+  const closeAfterBinary = waitForClose(binary);
+  const binaryThree = await sendAndReceive(binary, Buffer.from('{}'), { binary: true });
+  await closeAfterBinary;
+  check('连续二进制协议消息被拒绝并关闭连接',
+    [binaryOne, binaryTwo, binaryThree].every((item) => item.message === 'Binary messages are not supported'));
 
-  let auditFound = false;
-  try {
-    if (fs.existsSync(auditPath)) {
-      const content = fs.readFileSync(auditPath, 'utf-8');
-      auditFound = content.includes('SECURITY_TEST_MARKER');
-    }
-  } catch {}
-  check('audit', 'E1 命令被记录到审计日志', auditFound, auditPath);
-  check('audit', 'E2 审计日志文件存在', fs.existsSync(auditPath));
+  const survived = await authenticate(browserToken);
+  check('异常协议测试后 Relay 仍可正常鉴权', survived.message.type === 'auth_ok');
 
-  // 清理
-  main.ws.send(JSON.stringify({ type: 'terminal_delete', sessionId: auditSid }));
-  await sleep(200);
+  const unknownReplyPromise = nextMessage(valid.ws);
+  valid.ws.send(JSON.stringify({ type: '__UNKNOWN__', sessionId: 'safe-session' }));
+  const unknownReply = await unknownReplyPromise;
+  check('未知客户端消息返回受控错误且连接保持',
+    unknownReply.type === 'terminal_error' && unknownReply.message === 'Unknown message type' &&
+    valid.ws.readyState === WebSocket.OPEN);
 
-  // ═════════════════════════════════════════════════════════════
-  section('F. WebSocket 安全');
+  const invalidIdReplyPromise = nextMessage(valid.ws);
+  valid.ws.send(JSON.stringify({ type: 'terminal_create', sessionId: '../escape', title: 'bad' }));
+  const invalidIdReply = await invalidIdReplyPromise;
+  check('路径型 sessionId 被拒绝', invalidIdReply.message === 'Invalid sessionId');
 
-  // F1: 认证超时
-  let timeoutWorks = false;
-  try {
-    const ws = new WebSocket(TARGET);
-    await new Promise((resolve) => {
-      ws.on('open', () => {}); // 不发 auth，等超时
-      ws.on('message', (raw) => {
-        const m = JSON.parse(raw.toString());
-        if (m.message && m.message.includes('Authentication timeout')) {
-          timeoutWorks = true;
-        }
-      });
-      ws.on('close', () => resolve());
-      setTimeout(resolve, 12000);
-    });
-  } catch {}
-  check('ws', 'F1 认证超时断开 (10s)', timeoutWorks);
+  const oversizedReplyPromise = nextMessage(valid.ws);
+  valid.ws.send(JSON.stringify({
+    type: 'terminal_input',
+    sessionId: 'safe-session',
+    data: 'x'.repeat(64 * 1024 + 1),
+  }));
+  const oversizedReply = await oversizedReplyPromise;
+  check('超过 64 KiB 的单条终端输入被拒绝', oversizedReply.message === 'Invalid terminal input');
 
-  // F2: ping/pong 心跳
-  const { ws: pingWs } = await quickConnect(testToken);
-  await sleep(3000);
-  check('ws', 'F2 心跳保持连接存活', pingWs.readyState === 1);
+  const authTimeoutSocket = await openSocket();
+  const authTimeoutMessage = await nextMessage(authTimeoutSocket, 12000);
+  await waitForClose(authTimeoutSocket);
+  check('未鉴权连接在 10 秒后关闭', authTimeoutMessage.message === 'Authentication timeout');
 
-  // 关闭
-  main.ws.close();
-  pingWs.close();
-
-  // ═════════════════════════════════════════════════════════════
-  summary();
-
-  const categories = {};
-  for (const r of results) {
-    if (!categories[r.category]) categories[r.category] = { pass: 0, fail: 0 };
-    if (r.pass) categories[r.category].pass++;
-    else categories[r.category].fail++;
+  survived.ws.close();
+  // 最近一次成功鉴权已清空此前失败计数。随后故意触发本机地址限流；这项
+  // 放在最后，避免封禁影响其他协议用例。
+  const failures = [];
+  for (let index = 0; index < 9; index++) {
+    const fake = `invalid-${String(index).padStart(2, '0')}-${'x'.repeat(32)}`;
+    const attempt = await authenticate(fake);
+    failures.push(attempt.message);
+    attempt.ws.close();
   }
-  console.log('\n分类汇总:');
-  for (const [cat, c] of Object.entries(categories)) {
-    const icon = c.fail === 0 ? '✅' : '⚠️';
-    console.log(`  ${icon} ${cat}: ${c.pass}/${c.pass + c.fail} 通过`);
-  }
+  check('回环地址同样受暴力破解限流保护',
+    failures.slice(0, 8).every((item) => item.message === 'Invalid token') &&
+    /频繁|retry/i.test(failures[8].message || ''),
+    failures[8].message || 'missing rate-limit response');
 
-  process.exit(fail > 0 ? 1 : 0);
-})();
+  valid.ws.close();
+  const passed = results.filter(Boolean).length;
+  console.log(`\n${passed}/${results.length} 安全测试通过`);
+  if (passed !== results.length) process.exitCode = 1;
+})().catch((err) => {
+  console.error(`  ❌ 安全测试异常: ${err.stack || err.message}`);
+  process.exitCode = 1;
+}).finally(() => {
+  for (const ws of sockets) {
+    try { ws.close(); } catch {}
+  }
+});

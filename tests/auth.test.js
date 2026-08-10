@@ -1,38 +1,64 @@
 'use strict';
 
-const assert = require('assert');
-const { createAuthMiddleware } = require('../server/auth');
+const assert = require('node:assert');
+const {
+  createAuthMiddleware,
+  configuredTokenIsValid,
+  tokenShapeIsValid,
+} = require('../server/auth');
 
 const browserToken = `browser-${'b'.repeat(40)}`;
 const agentToken = `agent-${'a'.repeat(40)}`;
-const legacyToken = `legacy-${'l'.repeat(40)}`;
+const secondBrowserToken = `browser-${'c'.repeat(40)}`;
+const secondAgentToken = `agent-${'d'.repeat(40)}`;
 
-const separated = createAuthMiddleware({
+const auth = createAuthMiddleware({
   devices: {
-    production: {
-      name: 'Production',
-      browserToken,
-      agentToken,
-    },
+    production: { name: 'Production\nAgent', browserToken, agentToken },
+    staging: { name: 'Staging', browserToken: secondBrowserToken, agentToken: secondAgentToken },
   },
 });
 
-const browser = separated.verify(browserToken, 'browser');
-const agent = separated.verify(agentToken, 'agent');
-
+const browser = auth.verify(browserToken, 'browser');
+const agent = auth.verify(agentToken, 'agent');
 assert(browser.valid);
 assert(agent.valid);
 assert.equal(browser.routingKey, agent.routingKey);
 assert.notEqual(browser.routingKey, browserToken);
-assert.equal(separated.verify(browserToken, 'agent').valid, false);
-assert.equal(separated.verify(agentToken, 'browser').valid, false);
-assert.equal(separated.verify('invalid', 'browser').valid, false);
-assert.equal(separated.mode, 'devices');
-assert.equal(separated.tokenCount, 1);
+assert.equal(browser.name, 'Production Agent');
+assert.equal(auth.verify(browserToken, 'agent').valid, false);
+assert.equal(auth.verify(agentToken, 'browser').valid, false);
+assert.equal(auth.verify('invalid', 'browser').valid, false);
+assert.equal(auth.verify(browserToken, 'admin').valid, false);
+assert.equal(auth.mode, 'devices');
+assert.equal(auth.tokenCount, 2);
+assert.match(auth.generateSessionId(), /^[0-9a-f-]{36}$/);
 
-const legacy = createAuthMiddleware({ tokens: { [legacyToken]: 'Legacy' } });
-assert(legacy.verify(legacyToken, 'browser').valid);
-assert(legacy.verify(legacyToken, 'agent').valid);
-assert.equal(legacy.mode, 'legacy');
+assert(tokenShapeIsValid('x'.repeat(32)));
+assert(!tokenShapeIsValid('x'.repeat(31)));
+assert(!tokenShapeIsValid('x'.repeat(513)));
+assert(!tokenShapeIsValid('中'.repeat(400)));
+assert(!configuredTokenIsValid('change-me-' + 'x'.repeat(32)));
 
-console.log('✅ 角色分离凭据、内部路由和旧 Token 兼容测试通过');
+assert.throws(() => createAuthMiddleware({}), /devices/);
+assert.throws(() => createAuthMiddleware({ devices: {} }), /at least one/);
+assert.throws(() => createAuthMiddleware({
+  devices: { '../bad': { browserToken, agentToken } },
+}), /invalid device id/);
+assert.throws(() => createAuthMiddleware({
+  devices: { bad: { browserToken: 'short', agentToken } },
+}), /tokens must/);
+assert.throws(() => createAuthMiddleware({
+  devices: { bad: { browserToken, agentToken: browserToken } },
+}), /different/);
+assert.throws(() => createAuthMiddleware({
+  devices: {
+    one: { browserToken, agentToken },
+    two: { browserToken, agentToken: secondAgentToken },
+  },
+}), /reuses a credential/);
+assert.throws(() => createAuthMiddleware({
+  tokens: { [browserToken]: 'legacy' },
+}), /devices/);
+
+console.log('✅ 角色分离鉴权、配置拒绝策略和 Token 边界测试通过');

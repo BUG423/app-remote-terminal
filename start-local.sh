@@ -1,70 +1,30 @@
-#!/bin/bash
-# ═══════════════════════════════════════════════════════════════════
-# Remote Terminal — 本地 Agent 启动脚本
-# ═══════════════════════════════════════════════════════════════════
+#!/usr/bin/env bash
+set -euo pipefail
 
-set -e
+# Start the Agent as the current login account, preserving its HOME, PATH and
+# current working directory. This script never creates users, workspaces or
+# system services and never changes ownership or permissions outside the repo.
 
-SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-cd "$SCRIPT_DIR"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+CONFIG_PATH="${CW_CONFIG_PATH:-${SCRIPT_DIR}/agent/config.json}"
 
-echo "🖥  Remote Terminal — 启动本地 Agent"
-echo ""
+fail() {
+  echo "ERROR: $*" >&2
+  exit 1
+}
 
-# ── 1. 检查 Node.js ─────────────────────────────────────────────
-if ! command -v node &> /dev/null; then
-    echo "❌ 未安装 Node.js，请先安装: https://nodejs.org/"
-    exit 1
-fi
-echo "✅ Node.js $(node --version)"
+command -v node >/dev/null || fail "Node.js is not installed"
+command -v npm >/dev/null || fail "npm is not installed"
+node -e 'const major=Number(process.versions.node.split(".")[0]); process.exit(major >= 20 && major < 25 ? 0 : 1)' || \
+  fail "Node.js 20-24 is required; found $(node --version)"
+[[ -f "${CONFIG_PATH}" ]] || fail "missing ${CONFIG_PATH}; copy agent/config.json.example and configure it"
 
-# ── 2. 检查 Claude CLI（可选：仅旧聊天模式需要） ───────────────
-if command -v claude &> /dev/null; then
-    echo "✅ Claude Code $(claude --version 2>/dev/null | head -1)"
-else
-    echo "⚠  未找到 claude 命令（终端功能不需要它；如需旧聊天模式请安装 Claude Code）"
-fi
+echo "Remote Terminal Agent"
+echo "User: $(id -un) (uid=$(id -u))"
+echo "HOME: ${HOME}"
+echo "Working directory: ${PWD}"
+echo "Node: $(node --version)"
+echo "Config: ${CONFIG_PATH}"
 
-# ── 2.1 检查 node-pty 编译依赖 ──────────────────────────────────
-for tool in python3 make g++; do
-    command -v "$tool" &> /dev/null || echo "⚠  缺少 $tool —— node-pty 首次安装需要编译，请安装 build-essential / python3"
-done
-
-# ── 3. 检查配置 ─────────────────────────────────────────────────
-if [ ! -f config.json ]; then
-    echo "❌ 未找到 config.json，请先配置:"
-    echo "   cp config.json.example config.json"
-    echo "   编辑 config.json 填入你的 Token 和服务器地址"
-    exit 1
-fi
-echo "✅ config.json 存在"
-
-# ── 4. 安装依赖 ─────────────────────────────────────────────────
-echo ""
-echo "📦 安装锁定依赖..."
-cd agent && npm ci --no-audit --no-fund
-
-# ── 5. 启动 Agent ───────────────────────────────────────────────
-echo ""
-echo "🚀 启动 Agent，连接服务器..."
-echo "   将连接 config.json 中配置的 WSS Relay"
-echo ""
-
-# 使用 PM2（如果已安装）或直接运行
-if command -v pm2 &> /dev/null; then
-    echo "使用 PM2 守护进程模式..."
-    pm2 delete claude-web-agent 2>/dev/null || true
-    pm2 delete remote-terminal-agent 2>/dev/null || true
-    pm2 start index.js --name remote-terminal-agent --cwd "$SCRIPT_DIR/agent"
-    pm2 save
-    echo ""
-    echo "✅ Agent 已启动（PM2 守护）"
-    echo ""
-    echo "查看状态: pm2 status"
-    echo "查看日志: pm2 logs remote-terminal-agent"
-else
-    echo "直接运行（前台模式）..."
-    echo "提示: 安装 PM2 可以后台运行: npm install -g pm2"
-    echo ""
-    node index.js
-fi
+npm ci --prefix "${SCRIPT_DIR}/agent" --no-audit --no-fund
+exec env NODE_ENV=production CW_CONFIG_PATH="${CONFIG_PATH}" node "${SCRIPT_DIR}/agent/index.js"

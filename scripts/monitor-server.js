@@ -2,12 +2,15 @@
 'use strict';
 
 const fs = require('fs');
+const crypto = require('crypto');
 const http = require('http');
 const https = require('https');
 const os = require('os');
 const path = require('path');
 const tls = require('tls');
 const { spawnSync } = require('child_process');
+const { configuredTokenIsValid } = require('../server/auth');
+const { loadConfig } = require('../lib/load-config');
 
 const PROJECT_ROOT = path.join(__dirname, '..');
 
@@ -25,19 +28,15 @@ function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-function readJson(filePath, fallback = null) {
-  try {
-    return JSON.parse(fs.readFileSync(filePath, 'utf8'));
-  } catch {
-    return fallback;
-  }
-}
-
 function run(command, args, timeout = 10000) {
   const result = spawnSync(command, args, {
     encoding: 'utf8',
     timeout,
-    env: { ...process.env, LC_ALL: 'C' },
+    env: {
+      PATH: process.env.PATH || '/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin',
+      LANG: 'C.UTF-8',
+      LC_ALL: 'C',
+    },
   });
   return {
     ok: result.status === 0,
@@ -55,88 +54,6 @@ function systemctl(...args) {
 function serviceState(unit) {
   const result = systemctl('is-active', unit);
   return result.stdout || 'unknown';
-}
-
-function serviceEnabledState(unit) {
-  const result = systemctl('is-enabled', unit);
-  return result.stdout || 'unknown';
-}
-
-function isForbiddenAgentProcess(cwd, cmdline) {
-  const normalizedCwd = String(cwd || '').replace(/\/+$/, '');
-  const rawCommand = String(cmdline || '');
-  const args = rawCommand.includes('\0')
-    ? rawCommand.split('\0').filter(Boolean)
-    : rawCommand.trim().split(/\s+/).filter(Boolean);
-  const executable = path.basename(args[0] || '');
-  const normalizedCommand = args.slice(1).join(' ');
-  const cwdIsAgent = /\/remote-terminal\/agent$/.test(normalizedCwd);
-  const commandRunsAgent = /(?:^|\s)(?:\.\/)?agent\/index\.js(?:\s|$)/.test(normalizedCommand) ||
-    /\/remote-terminal\/agent\/index\.js(?:\s|$)/.test(normalizedCommand);
-  const runsNode = executable === 'node' || executable === 'nodejs';
-  return runsNode && (cwdIsAgent || commandRunsAgent);
-}
-
-function findForbiddenAgentProcesses() {
-  const matches = [];
-  for (const entry of fs.readdirSync('/proc')) {
-    if (!/^\d+$/.test(entry)) continue;
-    const pid = Number(entry);
-    if (pid === process.pid) continue;
-    try {
-      const cwd = fs.readlinkSync(`/proc/${pid}/cwd`);
-      const cmdline = fs.readFileSync(`/proc/${pid}/cmdline`, 'utf8');
-      if (isForbiddenAgentProcess(cwd, cmdline)) matches.push({ pid, cwd });
-    } catch {
-      // Processes can exit while /proc is being scanned.
-    }
-  }
-  return matches;
-}
-
-async function enforceNoRelayAgent(enabled, actions, errors) {
-  const unit = 'remote-terminal-agent.service';
-  if (enabled) {
-    const active = serviceState(unit);
-    const unitEnabled = serviceEnabledState(unit);
-    if (active === 'active' || unitEnabled === 'enabled') {
-      const stopped = systemctl('disable', '--now', unit);
-      if (stopped.ok) actions.push(`disabled and stopped ${unit}`);
-      else errors.push(`failed to stop ${unit}: ${stopped.stderr || stopped.error || stopped.status}`);
-    }
-
-    const processes = findForbiddenAgentProcesses();
-    for (const processInfo of processes) {
-      try {
-        process.kill(processInfo.pid, 'SIGTERM');
-        actions.push(`sent SIGTERM to forbidden Agent pid ${processInfo.pid}`);
-      } catch (err) {
-        if (err.code !== 'ESRCH') errors.push(`failed to stop Agent pid ${processInfo.pid}: ${err.message}`);
-      }
-    }
-    if (processes.length > 0) await sleep(1500);
-
-    for (const processInfo of findForbiddenAgentProcesses()) {
-      try {
-        process.kill(processInfo.pid, 'SIGKILL');
-        actions.push(`sent SIGKILL to persistent forbidden Agent pid ${processInfo.pid}`);
-      } catch (err) {
-        if (err.code !== 'ESRCH') errors.push(`failed to kill Agent pid ${processInfo.pid}: ${err.message}`);
-      }
-    }
-  }
-
-  const remaining = findForbiddenAgentProcesses();
-  const finalServiceState = serviceState(unit);
-  const finalEnabledState = serviceEnabledState(unit);
-  return {
-    ok: !enabled || (remaining.length === 0 && finalServiceState !== 'active' && finalEnabledState !== 'enabled'),
-    enforced: enabled,
-    serviceState: finalServiceState,
-    enabledState: finalEnabledState,
-    processCount: remaining.length,
-    processIds: remaining.map((item) => item.pid),
-  };
 }
 
 function requestStatus(client, options, timeoutMs = 4000) {
@@ -157,6 +74,34 @@ function requestStatus(client, options, timeoutMs = 4000) {
   });
 }
 
+function pinnedLocalTlsOptions(config) {
+  const certPath = config.tlsCertPath;
+  if (typeof certPath !== 'string' || !path.isAbsolute(certPath)) {
+    throw new Error('TLS monitoring requires an absolute tlsCertPath');
+  }
+  const stat = fs.lstatSync(certPath);
+  if (!stat.isFile() || stat.isSymbolicLink() || stat.size < 1 || stat.size > 2 * 1024 * 1024) {
+    throw new Error('TLS monitoring certificate must be a regular file no larger than 2 MiB');
+  }
+
+  const certificate = fs.readFileSync(certPath);
+  const expectedRaw = new crypto.X509Certificate(certificate).raw;
+  const expectedFingerprint = crypto.createHash('sha256').update(expectedRaw).digest();
+  return {
+    ca: certificate,
+    rejectUnauthorized: true,
+    checkServerIdentity: (_hostname, peerCertificate) => {
+      if (!Buffer.isBuffer(peerCertificate?.raw)) return new Error('local TLS peer certificate is missing');
+      const actualFingerprint = crypto.createHash('sha256').update(peerCertificate.raw).digest();
+      if (actualFingerprint.length !== expectedFingerprint.length ||
+          !crypto.timingSafeEqual(actualFingerprint, expectedFingerprint)) {
+        return new Error('local TLS certificate fingerprint mismatch');
+      }
+      return undefined;
+    },
+  };
+}
+
 async function checkInternalHealth(config, host, port) {
   const useTls = config.useTLS === true;
   const client = useTls ? https : http;
@@ -165,7 +110,7 @@ async function checkInternalHealth(config, host, port) {
     port,
     path: '/health',
     method: 'GET',
-    ...(useTls ? { rejectUnauthorized: false } : {}),
+    ...(useTls ? pinnedLocalTlsOptions(config) : {}),
   };
   const first = await requestStatus(client, options);
   if (first.ok) return first;
@@ -188,9 +133,13 @@ function checkLocalTls(host, port) {
 }
 
 function selectDevice(config, requestedId) {
-  const devices = config.devices && typeof config.devices === 'object' ? config.devices : {};
+  const devices = config.devices && typeof config.devices === 'object' && !Array.isArray(config.devices)
+    ? config.devices
+    : {};
   if (requestedId) {
-    if (!devices[requestedId]) throw new Error(`monitor device not found: ${requestedId}`);
+    if (!Object.prototype.hasOwnProperty.call(devices, requestedId)) {
+      throw new Error(`monitor device not found: ${requestedId}`);
+    }
     return { id: requestedId, ...devices[requestedId] };
   }
   const entries = Object.entries(devices);
@@ -208,9 +157,14 @@ function checkRemoteAgent(config, device, timeoutMs = 5000) {
   const target = `${useTls ? 'wss' : 'ws'}://${bindHost.includes(':') ? `[${bindHost}]` : bindHost}:${port}`;
 
   return new Promise((resolve) => {
-    // TLS 证书由 checkLocalTls 单独按公网域名严格校验。鉴权探针走本机回环，
-    // 因 URL 主机名是 127.0.0.1，仅在这里关闭重复的主机名校验。
-    const ws = new WebSocket(target, useTls ? { rejectUnauthorized: false } : undefined);
+    // 鉴权探针走本机地址，但仍固定到 Relay 配置中的证书，防止服务停机后
+    // 其他本机进程抢占端口并骗取监控用 browserToken。
+    const ws = new WebSocket(target, {
+      ...(useTls ? pinnedLocalTlsOptions(config) : {}),
+      handshakeTimeout: timeoutMs,
+      maxPayload: 1024 * 1024,
+      perMessageDeflate: false,
+    });
     let settled = false;
     const finish = (result) => {
       if (settled) return;
@@ -221,9 +175,18 @@ function checkRemoteAgent(config, device, timeoutMs = 5000) {
     };
     const timer = setTimeout(() => finish({ ok: false, online: false, error: 'authentication timeout' }), timeoutMs);
     ws.on('open', () => {
-      ws.send(JSON.stringify({ type: 'auth', role: 'browser', token: device.browserToken }));
+      ws.send(JSON.stringify({
+        type: 'auth',
+        role: 'browser',
+        token: device.browserToken,
+        protocolVersion: 2,
+      }));
     });
-    ws.on('message', (raw) => {
+    ws.on('message', (raw, isBinary) => {
+      if (isBinary) {
+        finish({ ok: false, online: false, error: 'binary Server response' });
+        return;
+      }
       let message;
       try {
         message = JSON.parse(raw.toString());
@@ -231,12 +194,15 @@ function checkRemoteAgent(config, device, timeoutMs = 5000) {
         finish({ ok: false, online: false, error: 'invalid Server response' });
         return;
       }
-      if (message.type === 'auth_ok') {
+      if (!message || typeof message !== 'object' || Array.isArray(message)) {
+        finish({ ok: false, online: false, error: 'invalid Server response' });
+      } else if (message.type === 'auth_ok' && message.role === 'browser') {
         finish({
           ok: message.agentOnline === true,
           online: message.agentOnline === true,
-          agentName: message.agentName || device.name || device.id,
-          sessions: Array.isArray(message.sessions) ? message.sessions.length : 0,
+          agentName: String(message.agentName || device.name || device.id)
+            .replace(/[\x00-\x1F\x7F-\x9F]/g, ' ').slice(0, 120),
+          sessions: Array.isArray(message.sessions) ? Math.min(message.sessions.length, 100) : 0,
         });
       } else if (message.type === 'error') {
         finish({ ok: false, online: false, error: message.message || 'authentication rejected' });
@@ -279,35 +245,44 @@ function collectResourceWarnings(metrics, thresholds) {
 
 function writeStatus(filePath, status) {
   const directory = path.dirname(filePath);
-  fs.mkdirSync(directory, { recursive: true, mode: 0o750 });
-  const temporary = `${filePath}.${process.pid}.tmp`;
-  fs.writeFileSync(temporary, `${JSON.stringify(status, null, 2)}\n`, { mode: 0o640 });
-  fs.renameSync(temporary, filePath);
-  fs.chmodSync(filePath, 0o640);
+  fs.mkdirSync(directory, { recursive: true, mode: 0o700 });
+  const temporary = `${filePath}.${process.pid}.${crypto.randomBytes(6).toString('hex')}.tmp`;
+  let fd;
+  try {
+    fd = fs.openSync(temporary, 'wx', 0o600);
+    fs.writeFileSync(fd, `${JSON.stringify(status, null, 2)}\n`);
+    fs.fsyncSync(fd);
+    fs.closeSync(fd);
+    fd = undefined;
+    fs.renameSync(temporary, filePath);
+    fs.chmodSync(filePath, 0o600);
+  } catch (err) {
+    if (fd !== undefined) {
+      try { fs.closeSync(fd); } catch {}
+    }
+    try { fs.unlinkSync(temporary); } catch {}
+    throw err;
+  }
 }
 
 async function main() {
   const startedAt = Date.now();
   const configPath = process.env.RT_MONITOR_CONFIG || '/etc/remote-terminal/server.json';
   const statePath = process.env.RT_MONITOR_STATE || '/var/lib/remote-terminal-monitor/status.json';
-  const config = readJson(configPath);
-  if (!config) throw new Error(`cannot read monitor config: ${configPath}`);
+  const config = loadConfig(configPath, { label: 'monitor Relay configuration' });
 
   const device = selectDevice(config, process.env.RT_MONITOR_DEVICE_ID || '');
-  if (typeof device.browserToken !== 'string' || device.browserToken.length < 32) {
+  if (!configuredTokenIsValid(device.browserToken)) {
     throw new Error(`device ${device.id} has no valid browserToken`);
   }
 
   const autoHeal = envFlag(process.env.RT_MONITOR_AUTO_HEAL, false);
-  const enforceNoAgent = envFlag(process.env.RT_MONITOR_ENFORCE_NO_AGENT, false);
   const tlsHost = process.env.RT_MONITOR_TLS_HOST || '';
   const tlsPort = positiveNumber(process.env.RT_MONITOR_TLS_PORT, 443, 1, 65535);
   const bindHost = ['0.0.0.0', '::'].includes(config.bindHost) ? '127.0.0.1' : (config.bindHost || '127.0.0.1');
   const port = positiveNumber(config.port, 3002, 1, 65535);
   const actions = [];
   const errors = [];
-
-  const agentPolicy = await enforceNoRelayAgent(enforceNoAgent, actions, errors);
 
   let serverState = serviceState('remote-terminal-server.service');
   if (serverState !== 'active' && autoHeal) {
@@ -337,7 +312,6 @@ async function main() {
   if (!internalHealth.ok) errors.push(`internal health check failed: ${internalHealth.error || internalHealth.statusCode || 'unknown'}`);
   if (!localTls.ok) errors.push(`local TLS check failed: ${localTls.error || localTls.statusCode || 'unknown'}`);
   if (!remoteAgent.online) errors.push(`remote Agent ${device.id} is offline: ${remoteAgent.error || 'not connected'}`);
-  if (!agentPolicy.ok) errors.push('forbidden Agent process or service remains on relay host');
 
   const metrics = collectMetrics('/');
   const thresholds = {
@@ -357,7 +331,6 @@ async function main() {
       internalHealth,
       localTls: { ...localTls, host: tlsHost || null, port: tlsHost ? tlsPort : null },
       remoteAgent,
-      relayAgentPolicy: agentPolicy,
     },
     metrics,
     thresholds,
@@ -383,7 +356,7 @@ if (require.main === module) {
 module.exports = {
   collectResourceWarnings,
   envFlag,
-  isForbiddenAgentProcess,
+  pinnedLocalTlsOptions,
   positiveNumber,
   selectDevice,
 };

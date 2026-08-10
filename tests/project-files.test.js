@@ -23,16 +23,25 @@ console.log('╔═════════════════════�
 console.log('║   配置、部署脚本与静态资源检查           ║');
 console.log('╚══════════════════════════════════════════╝');
 
-test('config.json.example 是合法 JSON', () => {
+test('Relay 与 Agent 配置模板合法且凭据职责分离', () => {
   const config = JSON.parse(fs.readFileSync(path.join(root, 'config.json.example'), 'utf8'));
+  const agentConfig = JSON.parse(fs.readFileSync(path.join(root, 'agent/config.json.example'), 'utf8'));
   assert.equal(config.bindHost, '0.0.0.0');
   assert.equal(config.port, 443);
   assert.equal(config.useTLS, true);
-  assert.equal(config.enableHttpRedirect, false);
-  assert.equal(config.enableLegacyChat, false);
   const device = config.devices['server-a'];
   assert.notEqual(device.browserToken, device.agentToken);
-  assert.equal(config.agentToken, device.agentToken);
+  assert.equal(config.agentToken, undefined);
+  assert.equal(config.serverUrl, undefined);
+  assert.equal(agentConfig.devices, undefined);
+  assert.equal(agentConfig.serverUrl, 'wss://terminal.example.com');
+  assert.equal(agentConfig.workspaceRoot, undefined);
+  assert.equal(agentConfig.allowRootAgent, undefined);
+  assert.equal(typeof agentConfig.requiredUser, 'string');
+  assert.equal(Number.isSafeInteger(agentConfig.requiredUid), true);
+  assert.equal(path.isAbsolute(agentConfig.requiredHome), true);
+  assert.equal(path.isAbsolute(agentConfig.requiredWorkingDirectory), true);
+  assert.equal(agentConfig.auditLogPath, undefined);
 });
 
 for (const file of ['deploy.sh', 'start-local.sh', 'scripts/run-server-tests.sh', 'scripts/install-relay-certificate.sh']) {
@@ -50,16 +59,28 @@ test('部署脚本不上传密钥、不改防火墙和系统入口配置', () =>
   assert(!/systemctl\s+(?:enable|disable)/.test(source));
 });
 
-test('部署脚本保留外置配置并复用现有进程管理器', () => {
+test('部署脚本保留外置配置并只使用低权限 systemd 服务', () => {
   const source = fs.readFileSync(path.join(root, 'deploy.sh'), 'utf8');
   assert(source.includes('REMOTE_CONFIG_PATH'));
   assert(source.includes('systemctl cat "${SERVER_SERVICE}"'));
   assert(source.includes('systemctl restart "${SERVER_SERVICE}"'));
-  assert(source.includes('pm2 describe remote-terminal-server'));
-  assert(source.indexOf('systemctl cat "${SERVER_SERVICE}"') < source.indexOf('pm2 describe remote-terminal-server'));
+  assert(!source.includes('pm2'));
+  assert(source.includes('systemctl cat "${SERVER_SERVICE}"'));
   assert(!source.includes('CW_CONFIG_PATH="${REMOTE_DIR}/config.json"'));
   assert(source.includes('for attempt in {1..15}'));
   assert(source.includes('health check failed after 15 seconds'));
+});
+
+test('本地 Agent 启动脚本不管理无关进程或旧聊天 CLI', () => {
+  const source = fs.readFileSync(path.join(root, 'start-local.sh'), 'utf8');
+  assert(!source.includes('pm2'));
+  assert(!/useradd|adduser|chown/.test(source));
+  assert(!source.includes('claude --version'));
+  assert(source.includes('agent/config.json'));
+  assert(source.includes('id -un'));
+  assert(source.includes('Working directory'));
+  assert(source.includes('NODE_ENV=production'));
+  assert(source.includes('exec env'));
 });
 
 test('客户端 UI 只引用安装包内依赖', () => {
@@ -81,18 +102,36 @@ test('云端 Relay 不包含网页目录或 Express 运行时', () => {
   assert(!Object.hasOwn(serverPackage.dependencies, '@xterm/addon-fit'));
 });
 
-test('systemd 单元使用独立低权限账户和资源上限', () => {
+test('Relay 使用受限系统账户，Agent 用户单元保持当前身份', () => {
   const serverUnit = fs.readFileSync(path.join(root, 'deploy/systemd/remote-terminal-server.service'), 'utf8');
   const agentUnit = fs.readFileSync(path.join(root, 'deploy/systemd/remote-terminal-agent.service'), 'utf8');
   assert(serverUnit.includes('User=remote-terminal-server'));
-  assert(agentUnit.includes('User=remote-terminal-agent'));
   assert(serverUnit.includes('NoNewPrivileges=true'));
   assert(serverUnit.includes('AmbientCapabilities=CAP_NET_BIND_SERVICE'));
   assert(serverUnit.includes('CapabilityBoundingSet=CAP_NET_BIND_SERVICE'));
-  assert(agentUnit.includes('NoNewPrivileges=true'));
   assert(serverUnit.includes('MemoryMax='));
   assert(agentUnit.includes('MemoryMax='));
-  assert(agentUnit.includes('ReadWritePaths=/var/lib/remote-terminal-agent'));
+  assert(agentUnit.includes('EnvironmentFile=%h/.config/remote-terminal/agent.env'));
+  assert(agentUnit.includes('REMOTE_TERMINAL_WORKING_DIRECTORY'));
+  assert(!/^User=/m.test(agentUnit));
+  assert(!/^Group=/m.test(agentUnit));
+  assert(!agentUnit.includes('/var/lib/remote-terminal-agent'));
+  assert(!/useradd|adduser|chown/.test(agentUnit));
+  assert(!agentUnit.includes('remote-terminal-server.service'));
+  assert(serverUnit.includes('PrivateDevices=true'));
+  assert(serverUnit.includes('ProtectProc=invisible'));
+});
+
+test('Agent 不创建用户、HOME 或工作目录', () => {
+  const source = [
+    'agent/index.js', 'agent/session-manager.js', 'agent/terminal.js',
+    'agent/runtime-identity.js', 'start-local.sh', 'deploy/systemd/remote-terminal-agent.service',
+  ].map((file) => fs.readFileSync(path.join(root, file), 'utf8')).join('\n');
+  assert(!/useradd|adduser/.test(source));
+  assert(!source.includes('User=remote-terminal-agent'));
+  assert(!source.includes("mkdirSync(cwd"));
+  assert(!source.includes('mkdirSync(resolved'));
+  assert(source.includes('Agent never creates workspaces'));
 });
 
 test('证书安装脚本只发布受限权限副本并支持 Certbot hook', () => {
@@ -104,16 +143,18 @@ test('证书安装脚本只发布受限权限副本并支持 Certbot hook', () =
   assert(!source.includes('chmod 777'));
 });
 
-test('定期监控单元默认只读且由环境文件显式启用恢复策略', () => {
+test('定期监控单元默认只读且不持有进程扫描/强杀权限', () => {
   const monitorUnit = fs.readFileSync(path.join(root, 'deploy/systemd/remote-terminal-monitor.service'), 'utf8');
   const monitorTimer = fs.readFileSync(path.join(root, 'deploy/systemd/remote-terminal-monitor.timer'), 'utf8');
   assert(monitorUnit.includes('Type=oneshot'));
   assert(monitorUnit.includes('Environment=RT_MONITOR_AUTO_HEAL=0'));
-  assert(monitorUnit.includes('Environment=RT_MONITOR_ENFORCE_NO_AGENT=0'));
   assert(monitorUnit.includes('EnvironmentFile=-/etc/remote-terminal/monitor.env'));
   assert(monitorUnit.includes('StateDirectory=remote-terminal-monitor'));
   assert(monitorUnit.includes('NoNewPrivileges=true'));
   assert(monitorUnit.includes('MemoryMax='));
+  assert(monitorUnit.includes('CapabilityBoundingSet=CAP_DAC_READ_SEARCH'));
+  assert(!monitorUnit.includes('CAP_KILL'));
+  assert(!monitorUnit.includes('CAP_SYS_PTRACE'));
   assert(monitorTimer.includes('OnUnitInactiveSec=5min'));
   assert(monitorTimer.includes('Persistent=true'));
   assert(!monitorUnit.includes('/agent/index.js'));
@@ -125,6 +166,18 @@ test('监控脚本通过 Node 语法检查', () => {
   assert.equal(result.status, 0, result.stderr);
   const source = fs.readFileSync(path.join(root, 'scripts/monitor-server.js'), 'utf8');
   assert(!source.includes("serviceState('nginx.service')"));
+  assert(!source.includes('process.kill('));
+});
+
+test('旧聊天协议、原始按键审计和 PM2 回退代码均已删除', () => {
+  assert(!fs.existsSync(path.join(root, 'agent/audit-log.js')));
+  const combined = [
+    'agent/index.js', 'server/index.js', 'deploy.sh', 'start-local.sh',
+  ].map((file) => fs.readFileSync(path.join(root, file), 'utf8')).join('\n');
+  assert(!combined.includes("type: 'chat'"));
+  assert(!combined.includes('claudeDangerouslySkipPermissions'));
+  assert(!combined.includes('auditLogPath'));
+  assert(!combined.includes('pm2'));
 });
 
 const passed = results.filter(Boolean).length;
