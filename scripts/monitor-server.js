@@ -88,7 +88,8 @@ function pinnedLocalTlsOptions(config) {
   const expectedRaw = new crypto.X509Certificate(certificate).raw;
   const expectedFingerprint = crypto.createHash('sha256').update(expectedRaw).digest();
   return {
-    ca: certificate,
+    // A public fullchain omits its root; keep public roots before checking the pin.
+    ca: [...tls.rootCertificates, certificate],
     rejectUnauthorized: true,
     checkServerIdentity: (_hostname, peerCertificate) => {
       if (!Buffer.isBuffer(peerCertificate?.raw)) return new Error('local TLS peer certificate is missing');
