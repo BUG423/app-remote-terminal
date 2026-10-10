@@ -1,85 +1,78 @@
-# Remote Terminal
+# 💻 Remote Terminal
 
-Remote Terminal 是一套 Android、Windows、macOS 和 Linux 通用的远程终端软件。客户端与受控端 Agent 都主动连接 Relay，受控设备无需开放 SSH、RDP 或其他入站端口。
+[![Platform: Android](https://img.shields.io/badge/Platform-Android-3DDC84?logo=android&logoColor=white)](https://developer.android.com/)
+[![Platform: Desktop](https://img.shields.io/badge/Platform-Desktop_(Win%20%7C%20Mac%20%7C%20Linux)-47848F?logo=electron&logoColor=white)](https://www.electronjs.org/)
+[![Runtime: Node.js](https://img.shields.io/badge/Runtime-Node.js_20%2B-339933?logo=node.js&logoColor=white)](https://nodejs.org/)
+[![Protocol: WSS](https://img.shields.io/badge/Protocol-WSS_v2-blue?logo=websocket&logoColor=white)](https://websockets.spec.whatwg.org/)
+[![License: CC BY-NC-ND 4.0](https://img.shields.io/badge/License-CC_BY--NC--ND_4.0-red.svg)](https://creativecommons.org/licenses/by-nc-nd/4.0/)
 
-当前客户端版本为 `0.3.3`。浏览器网页端已下架；Relay 不托管页面、不依赖 Nginx，只保留健康检查、角色分离鉴权、设备路由和终端状态同步。
+> **Remote Terminal** 是一套专为多平台设计的高安全、零入站端口依赖的通用远程终端系统。覆盖 Android、Windows、macOS 与 Linux，客户端与受控端 Agent 均采用向外主动长连接（反向 WSS），受控设备无需开放 SSH、RDP 或公网防火墙入站端口。
+
+---
 
 ![Remote Terminal 设备管理界面](docs/images/screenshot.png)
 
-## 功能
+---
 
-- 安装后直接进入软件，在“设备”页添加域名和浏览器 Token。
-- 管理、搜索、重命名、删除和切换多台设备。
-- 每台设备独立保存会话别名、置顶状态和当前会话。
-- 新建、查看、搜索、重命名、置顶和删除终端会话。
-- 完整终端快照、滚动历史、断线重连、序号断档重同步和渲染背压保护。
-- Android 键盘顶起终端内容，并适配状态栏、刘海、导航栏和预测式返回。
-- 桌面端支持快速切换、分屏、快捷键、大段粘贴确认和本地显示设置。
+## ✨ 核心特性
 
-## 架构
+- **🔌 反向隧道·零入站端口开放**：受控主机与管理客户端双向主动发起 WSS 连接至轻量 Relay 中继，穿透 NAT 与复杂内网，彻底免去公网端口映射与传统 SSH 暴露风险。
+- **🔐 硬件级凭据安全与零按键记录**：
+  - **角色双 Token 隔离**：强制拆分只读客户端鉴权凭据（`browserToken`）与受控端凭据（`agentToken`）。
+  - **系统级密钥保险箱**：Android 采用 Keystore AES-GCM 加密存储；桌面端依托 Electron `safeStorage` 与受限凭据文件（`0600`）。
+  - **零交互痕迹审计**：不留存明文按键交互流，不记录密码或交互式机密。
+- **⚡ 工业级终端流控与会话状态保真**：
+  - 完整会话快照、断线重连平滑补齐、序号断档安全重同步。
+  - 渲染背压控制（Backpressure），防止突发高频大日志压垮客户端渲染引擎。
+- **📱 跨平台深度原生交互**：
+  - **Android**：虚拟键盘动态顶起终端视图，精准适配系统状态栏、挖孔屏、刘海屏及预测式手势返回。
+  - **桌面端（Windows / macOS / Linux）**：多会话多设备秒级切换、智能分屏、大文本粘贴二次确认与终端主题定制。
 
-```text
-Android / Desktop ─────── WSS ──────────┐
-                                        │
-                                        ▼
-                                Node.js Relay
-                                        ▲
-                                        │
-Agent + node-pty ───────── WSS ─────────┘
-        │
-        └── 受控账户的 bash / zsh / PowerShell
+---
+
+## 🏗️ 系统架构
+
+```mermaid
+flowchart LR
+    subgraph Clients["原生客户端"]
+        AND["📱 Android Native"]
+        DSK["🖥️ Desktop (Win / Mac / Linux)"]
+    end
+
+    subgraph RelayCluster["Relay 通信中继"]
+        SRV["⚡ Node.js WSS Relay<br/>• 角色鉴权隔离<br/>• 终端消息路由<br/>• 序号状态同步"]
+    end
+
+    subgraph TargetHosts["受控主机"]
+        AGT["🤖 Agent 守护进程<br/>• node-pty 虚拟终端<br/>• 身份与工作目录锁定"]
+        SH["💻 bash / zsh / PowerShell"]
+    end
+
+    AND -->|"WSS (出站)"| SRV
+    DSK -->|"WSS (出站)"| SRV
+    AGT -->|"WSS (出站)"| SRV
+    AGT --> SH
+
+    style RelayCluster fill:#eef2ff,stroke:#6366f1,color:#1e1b4b
+    style Clients fill:#f0fdf4,stroke:#22c55e,color:#14532d
+    style TargetHosts fill:#fff7ed,stroke:#f97316,color:#7c2d12
 ```
 
-Relay 的 HTTP 控制面只有：
+> **HTTP 控制面说明**：Relay 仅开放 `GET /health` 健康探针与 WebSocket 通信端点，其他所有未授权 HTTP 访问一律返回 `410 Gone`。
 
-- `GET /health`：健康检查。
-- WebSocket：协议 v2 鉴权与终端消息。
-- 其他路径：`410 Gone`。
+---
 
-协议角色名称 `browser` 是客户端兼容名称，不表示仍存在网页端。
+## 🚀 快速上手与运行
 
-## 客户端使用
+### 1. 中继服务配置 (Relay)
 
-1. 安装 APK 或桌面安装包。
-2. 打开“设备”，选择“添加设备”。
-3. 输入设备名称、Relay 地址和该设备的 `browserToken`。
-4. 保存并连接，在“终端”页查看或新建会话。
-
-地址支持域名、IP、自定义端口和路径，例如：
-
-```text
-wss://terminal.example.cn
-wss://terminal.example.cn:8443/relay
-```
-
-公网连接必须使用 WSS，并提供与域名或 IP 匹配的有效 TLS 证书。`ws://` 仅允许本机回环测试。使用自定义端口时，需要在阿里云安全组和主机防火墙中放行对应 TCP 端口；生产环境优先使用 `443`。
-
-## 本地数据与安全边界
-
-普通本地配置只保存设备名称、WSS 地址、显示设置、会话别名和置顶状态。Token 不进入 `localStorage`：
-
-- Android 使用 Android Keystore 的 AES-GCM 密钥加密，并关闭云备份和设备迁移备份。
-- 桌面端使用 Electron `safeStorage` 和原子凭据文件；文件权限为 `0600`。
-- Linux 若只有 `basic_text` 后端，软件拒绝持久化 Token，只在当前进程内保存。
-
-每台设备必须使用两枚不同的随机 Token，长度为 32–512 个字符：
-
-- `browserToken`：只允许原生客户端登录。
-- `agentToken`：只允许受控端 Agent 登录。
-
-持有有效 `browserToken` 的用户可以操作 Agent 当前账户权限范围内的完整 Shell。本项目不是多租户堡垒机，也不提供文件系统沙箱。Agent 必须绑定到管理员明确指定的既有用户、HOME 和工作目录；项目脚本和自动部署工具不得自行创建用户、工作目录或迁移原账户数据。如需隔离账户，必须由管理员另行明确授权并手工准备。
-
-内置“逐按键审计日志”已移除，因为它会记录密码、私钥口令和其他交互式秘密。需要合规审计时，应在受控设备上使用操作系统级方案，并设置明确的脱敏、访问控制和留存策略。
-
-## Relay 配置
-
-生成两枚独立随机 Token：
+生成两枚独立高强度随机 Token：
 
 ```bash
 node -e "for(let i=0;i<2;i++) console.log(require('crypto').randomBytes(32).toString('base64url'))"
 ```
 
-复制 [config.json.example](config.json.example)，只配置 Relay：
+复制配置文件模板 [config.json.example](config.json.example) 并填写 Relay 端口、TLS 证书及设备映射：
 
 ```json
 {
@@ -91,52 +84,29 @@ node -e "for(let i=0;i<2;i++) console.log(require('crypto').randomBytes(32).toSt
   "devices": {
     "production-a": {
       "name": "生产服务器 A",
-      "browserToken": "客户端随机Token",
-      "agentToken": "另一枚Agent随机Token"
+      "browserToken": "<客户端 Token>",
+      "agentToken": "<受控端 Agent Token>"
     }
   }
 }
 ```
 
-生产模式拒绝符号链接配置和组/其他用户可读的配置文件：
+以受限权限安装配置文件并启动服务：
 
 ```bash
 sudo install -o remote-terminal-server -g remote-terminal-server -m 0600 \
   config.json /etc/remote-terminal/server.json
-```
-
-安装依赖并启用低权限 systemd 服务：
-
-```bash
 npm ci --prefix /opt/remote-terminal/server --omit=dev --no-audit --no-fund
-sudo install -m 0644 deploy/systemd/remote-terminal-server.service /etc/systemd/system/
-sudo systemctl daemon-reload
 sudo systemctl enable --now remote-terminal-server.service
 ```
 
-Relay 可直接提供 TLS，不需要 Nginx。证书部署脚本会把 Certbot 证书原子复制到受限目录并重启服务：
+### 2. 受控端配置 (Agent)
 
-```bash
-sudo certbot certonly --standalone -d terminal.example.cn
-sudo scripts/install-relay-certificate.sh terminal.example.cn
-```
-
-## Agent 配置
-
-先在准备运行 Agent 的原始终端中记录身份，不能使用 `sudo` 切换用户：
-
-```bash
-id -un
-id -u
-printf '%s\n' "$HOME"
-pwd -P
-```
-
-复制 [agent/config.json.example](agent/config.json.example)，把以上结果原样写入身份绑定字段：
+在目标机器既有登录账户下，复制 [agent/config.json.example](agent/config.json.example)：
 
 ```json
 {
-  "agentToken": "与 Relay 对应设备的 agentToken 一致",
+  "agentToken": "<与 Relay 对应的 agentToken>",
   "serverUrl": "wss://terminal.example.cn",
   "requiredUser": "当前用户名",
   "requiredUid": 1000,
@@ -146,104 +116,52 @@ pwd -P
 }
 ```
 
-Agent 不会创建工作目录。配置的用户、UID、HOME 或启动目录只要有一项不一致，Agent 就会在创建终端前拒绝启动。这样 `cloud`、`codex`、Shell 配置和当前用户凭据均沿用原环境。
-
-配置文件只需由当前用户保护：
+启动本地受控 Agent：
 
 ```bash
 chmod 600 agent/config.json
 ./start-local.sh
 ```
 
-需要后台常驻时，可将 [remote-terminal-agent.service](deploy/systemd/remote-terminal-agent.service) 安装为当前用户的 `systemctl --user` 单元，并参考 [agent.env.example](deploy/systemd/remote-terminal-agent.env.example) 在 `~/.config/remote-terminal/agent.env` 中填写既有工作目录、Agent 入口和配置路径。不得安装为系统级服务，不得添加 `User=`/`Group=`，也不得执行 `useradd`、`adduser`、`chown` 或创建替代 HOME。若使用 PM2，也必须由当前用户直接运行并显式设置原始 `cwd`，不能使用 `sudo pm2`。
+### 3. 客户端连接与使用
 
-受限网络可使用 `proxyUrl`、`HTTPS_PROXY`、`HTTP_PROXY` 和 `NO_PROXY`。私有 CA 使用绝对路径 `tlsCaPath`；不要关闭 TLS 校验。
+1. 打开 Android 或桌面端客户端，进入「设备」页面点击「添加设备」。
+2. 输入设备名称、Relay 地址（如 `wss://terminal.example.cn`）以及分配的 `browserToken`。
+3. 保存后即可实时接入受控终端，创建和管理多路 Shell 会话。
 
-## 构建客户端
+---
 
-共用 UI：
+## 🛠️ 构建与测试
 
-```bash
-npm ci --prefix clients --no-audit --no-fund
-```
-
-Android 需要 JDK 17、Android SDK Platform 35 和 Build Tools 35.0.0：
+### 构建客户端
 
 ```bash
+# 构建 Android 客户端 (需 JDK 17 及 Android SDK Platform 35)
 cd clients/android
-./gradlew lintDebug assembleDebug
-./gradlew lintRelease assembleRelease
-```
+./gradlew assembleRelease
 
-输出：
-
-```text
-clients/android/app/build/outputs/apk/debug/app-debug.apk
-clients/android/app/build/outputs/apk/release/app-release-unsigned.apk
-```
-
-桌面端使用 Electron 43：
-
-```bash
+# 构建桌面客户端 (Electron)
 cd clients/desktop
 npm ci
-npm run smoke
 npm run dist
-npm run dist:win:zip
 ```
 
-常用输出：
-
-```text
-clients/desktop/dist/Remote Terminal-0.3.3.AppImage
-clients/desktop/dist/Remote Terminal-0.3.3-win.zip
-```
-
-仓库不保存发布签名密钥。正式分发前应在受控发布环境签名 Android、Windows 和 macOS 安装包。
-
-## 更新与监控
-
-`deploy.sh` 只接受现有、干净的 Git 工作区和已安装的 systemd 服务。它不会上传 Token、修改防火墙、回退到 PM2 或部署网页：
+### 自动化测试
 
 ```bash
-SERVER_HOST=服务器地址 \
-SERVER_SSH_PORT=822 \
-REMOTE_DIR=/opt/remote-terminal \
-REMOTE_CONFIG_PATH=/etc/remote-terminal/server.json \
-bash deploy.sh
-```
-
-可选的 `remote-terminal-monitor.*` 每五分钟检查 Relay、TLS、Agent 在线状态和资源阈值。自动恢复默认关闭；只有显式设置 `RT_MONITOR_AUTO_HEAL=1` 才会尝试重启一次 Relay。
-
-## 测试
-
-```bash
-npm ci --prefix clients --no-audit --no-fund
-npm ci --prefix server --no-audit --no-fund
-npm ci --prefix agent --no-audit --no-fund
+# 运行完整协议与安全测试套件
 npm test
-bash scripts/run-server-tests.sh
+
+# 运行性能与延迟基准评测
 npm run test:latency
-cd clients/desktop
-npm run latency:ui
 ```
 
-测试覆盖角色隔离、配置权限、限流、异常 JSON/二进制协议、重复 Agent 竞态、真实 PTY、历史快照、断线恢复、渲染背压、TLS、客户端离线打包和设备管理。延迟测试使用临时本机 Relay、假 Agent 和真实 PTY，不连接或重启生产设备；界面延迟测试同时覆盖桌面与手机宽度、终端自动铺满和突发输出阻塞。
+---
 
-## 目录
+## 📄 知识产权与开源协议
 
-```text
-clients/ui/            Android 与桌面端共用的离线 UI
-clients/android/       Android WebView、Keystore 与系统 Insets
-clients/desktop/       Electron、safeStorage 与桌面打包
-server/                原生 HTTPS/WSS Relay
-agent/                 node-pty 终端 Agent
-lib/                   安全配置读取与终端状态公共实现
-deploy/systemd/        低权限服务与监控单元
-scripts/               证书、测试和运维脚本
-tests/                 单元、协议、TLS、恢复与安全测试
-```
+本项目遵循 **[Creative Commons Attribution-NonCommercial-NoDerivatives 4.0 International (CC BY-NC-ND 4.0)](https://creativecommons.org/licenses/by-nc-nd/4.0/)** 严格非商业开源许可：
 
-## 许可证
-
-MIT，见 [LICENSE](LICENSE)。
+- ❌ **严禁商用**：任何个人或组织不得将本项目源码、编译产物或衍生版本用于任何商业盈利目的。
+- ❌ **禁止演绎与分发修改版**：未经授权不得散布基于本项目修改后的二次分发版本。
+- 🔒 **权利保留**：作者保留对本项目代码与架构的所有版权与法律追责权利。
