@@ -1,14 +1,25 @@
-# 💻 Remote Terminal
+# 💻 app-remote-terminal
 
+[![Release](https://img.shields.io/github/v/release/BUG423/app-remote-terminal?color=brightgreen)](https://github.com/BUG423/app-remote-terminal/releases)
 [![Platform: Android](https://img.shields.io/badge/Platform-Android-3DDC84?logo=android&logoColor=white)](https://developer.android.com/)
 [![Platform: Desktop](https://img.shields.io/badge/Platform-Desktop_(Win%20%7C%20Mac%20%7C%20Linux)-47848F?logo=electron&logoColor=white)](https://www.electronjs.org/)
 [![Runtime: Node.js](https://img.shields.io/badge/Runtime-Node.js_20%2B-339933?logo=node.js&logoColor=white)](https://nodejs.org/)
 [![Protocol: WSS](https://img.shields.io/badge/Protocol-WSS_v2-blue?logo=websocket&logoColor=white)](https://websockets.spec.whatwg.org/)
 [![License: CC BY-NC-ND 4.0](https://img.shields.io/badge/License-CC_BY--NC--ND_4.0-red.svg)](https://creativecommons.org/licenses/by-nc-nd/4.0/)
 
-> **Remote Terminal** 是一套专为多平台设计的高安全、零入站端口依赖的通用远程终端系统。覆盖 Android、Windows、macOS 与 Linux，客户端与受控端 Agent 均采用向外主动长连接（反向 WSS），受控设备无需开放 SSH、RDP 或公网防火墙入站端口。
+> **app-remote-terminal** 是一套专为多平台设计的高安全、零入站端口依赖的通用远程终端系统。覆盖 Android、Windows、macOS 与 Linux，客户端与受控端 Agent 均采用向外主动长连接（反向 WSS），受控设备无需开放 SSH、RDP 或公网防火墙入站端口。
 
 ---
+
+## 📥 快速下载与安装
+
+前往 **[GitHub Releases 最新发布页](https://github.com/BUG423/app-remote-terminal/releases)** 获取最新多端客户端与发布安装包：
+
+👉 **[点击直接进入 Releases 下载各平台客户端](https://github.com/BUG423/app-remote-terminal/releases)**
+
+---
+
+## 🖼️ 核心界面预览
 
 ![Remote Terminal 设备管理界面](docs/images/screenshot.png)
 
