@@ -29,7 +29,7 @@
 
 - **🔌 反向隧道·零入站端口开放**：受控主机与管理客户端双向主动发起 WSS 连接至轻量 Relay 中继，穿透 NAT 与复杂内网，彻底免去公网端口映射与传统 SSH 暴露风险。
 - **🔐 硬件级凭据安全与零按键记录**：
-  - **角色双 Token 隔离**：强制拆分只读客户端鉴权凭据（`browserToken`）与受控端凭据（`agentToken`）。
+  - **角色双 Token 隔离**：拆分 APP 控制凭据（`browserToken`）与受控端接入凭据（`agentToken`），每台电脑单独配对。
   - **系统级密钥保险箱**：Android 采用 Keystore AES-GCM 加密存储；桌面端依托 Electron `safeStorage` 与受限凭据文件（`0600`）。
   - **零交互痕迹审计**：不留存明文按键交互流，不记录密码或交互式机密。
 - **⚡ 工业级终端流控与会话状态保真**：
@@ -74,6 +74,64 @@ flowchart LR
 ---
 
 ## 🚀 快速上手与运行
+
+### 已有阿里云中转？只需要配对远程电脑
+
+阿里云运行一次 Relay，并由 systemd 持续守护；每台受控电脑运行自己的 Agent；你的本机只运行 APP。APP 和 Agent 都主动连接同一个 `wss://` 中转地址。SSH 的端口只用于管理云服务器，不填进 APP 或 Agent 的中转地址。
+
+| 填写位置 | 中转地址 | Token 从哪里取 |
+| --- | --- | --- |
+| 远程电脑的 Agent | 阿里云 WSS 地址 | 该电脑的 `agentToken` |
+| 你本机的 APP | 同一个 WSS 地址 | 同一设备条目的 `browserToken`（APP 访问 Token） |
+
+`browserToken` 可以控制该设备的终端，名称是历史协议命名。两枚 Token 不同，但必须来自服务器上的同一个设备条目。设备 ID 只用于服务器管理，不需要手动填进 Agent 或 APP。第二台电脑需要新增设备，不能复用第一台的 Agent Token。
+
+在阿里云的项目目录运行以下命令，即可查看服务和**每一台** Agent 的状态，不输出 Token：
+
+```bash
+cd /opt/remote-terminal
+npm run devices -- status
+```
+
+新增一台电脑（自动备份配置、生成独立凭据、重启服务；健康检查失败会恢复原配置）：
+
+```bash
+npm run devices -- add office-pc --name "办公室电脑" \
+  --relay wss://你的中转域名 --restart --output /root/office-pc-pairing
+```
+
+已有设备直接导出，保持它的 Token 不变：
+
+```bash
+npm run devices -- show office-pc --relay wss://你的中转域名 \
+  --output /root/office-pc-pairing-export
+```
+
+输出目录含两份私密文件：`office-pc.agent.json` 发给受控电脑，`office-pc.app.json` 留在控制端。不要把配对文件提交到 Git。
+
+远程电脑安装 Agent 依赖后，在希望终端打开的既有工作目录运行向导，自动绑定当前用户、UID、HOME 和工作目录：
+
+```bash
+# 首次在项目目录安装依赖
+npm ci --prefix agent
+
+# 进入希望作为终端起点的既有目录，再运行项目里的向导
+cd /你的既有工作目录
+node /项目路径/scripts/setup-agent.js --profile /私密路径/office-pc.agent.json
+```
+
+不带 `--profile` 运行时，向导会询问中转地址和 Agent Token；已有配置需显式加 `--replace`，原文件会备份。按向导输出的命令启动 Agent；Linux/macOS 也可在绑定的工作目录执行 `/项目路径/start-local.sh`。保持向导使用的同一登录账户，无需 sudo。长期运行的 Linux Agent 可使用 [用户级 systemd 单元](deploy/systemd/remote-terminal-agent.service)。
+
+本机 APP 打开「设备 → 添加设备 → 粘贴 APP 配对配置」，粘贴 `office-pc.app.json` 的内容，点击「填入设备信息 → 保存并连接」。也可手动填写名称、WSS 地址和 `browserToken`。
+
+常见情况：
+
+- **中转已连接，Agent 离线**：APP 凭据正确；检查远程电脑的 Agent 是否启动、地址是否相同、是否用了同一条设备记录的 `agentToken`。
+- **Agent already connected / code 4000**：同一条设备已有在线电脑；新增设备或停止原电脑的 Agent。
+- **Invalid token**：Agent 使用 `agentToken`，APP 使用 `browserToken`；修改服务器配置后需重启 Relay。
+- **配置中的运行身份不符**：回到向导绑定的工作目录，用同一账户启动，或在新目录重新运行向导。
+
+下面是首次部署 Relay 和手动配置 Agent 的底层步骤。
 
 ### 1. 中继服务配置 (Relay)
 

@@ -16,7 +16,7 @@ try {
   assert.equal(result.status, 0, result.stderr);
 
   for (const file of [
-    'www/index.html', 'www/app.js', 'www/client-settings.js', 'www/device-store.js', 'www/strict-websocket.js',
+    'www/index.html', 'www/app.js', 'www/client-settings.js', 'www/device-store.js', 'www/strict-websocket.js', 'www/pairing-profile.js',
     'www/vendor/xterm.js', 'www/vendor/xterm.css', 'www/vendor/addon-fit.js',
   ]) {
     assert(fs.existsSync(path.join(generated, file)), `缺少打包资源 ${file}`);

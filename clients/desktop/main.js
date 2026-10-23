@@ -210,6 +210,22 @@ function createWindow() {
             add.click();
             const opened = !modal.classList.contains('hidden') &&
               document.getElementById('device-relay-input').value.startsWith('wss://');
+            const pairing = document.getElementById('device-pairing-input');
+            pairing.value = JSON.stringify({
+              type: 'remote-terminal-app', version: 1, name: '配对测试电脑',
+              relayUrl: 'wss://relay.example.cn', browserToken: 'smoke-browser-' + 'x'.repeat(32)
+            });
+            document.getElementById('device-pairing-import').click();
+            const paired = document.getElementById('device-name-input').value === '配对测试电脑' &&
+              document.getElementById('device-relay-input').value === 'wss://relay.example.cn/' &&
+              document.getElementById('device-token-input').value.startsWith('smoke-browser-') && pairing.value === '';
+            pairing.value = JSON.stringify({
+              type: 'remote-terminal-agent', version: 1,
+              serverUrl: 'wss://relay.example.cn', agentToken: 'smoke-agent-' + 'y'.repeat(32)
+            });
+            document.getElementById('device-pairing-import').click();
+            const rejectedAgentProfile = !document.getElementById('device-form-error').classList.contains('hidden') &&
+              document.getElementById('device-token-input').value.startsWith('smoke-browser-');
             document.getElementById('device-name-input').value = 'Security smoke';
             document.getElementById('device-relay-input').value = 'ws://public.example.cn';
             document.getElementById('device-token-input').value = 'must-not-persist';
@@ -217,7 +233,8 @@ function createWindow() {
             const rejectedInsecureEndpoint = !document.getElementById('device-form-error').classList.contains('hidden') &&
               !(localStorage.getItem('remote-terminal-devices-v1') || '').includes('must-not-persist');
             cancel.click();
-            return opened && rejectedInsecureEndpoint && modal.classList.contains('hidden');
+            return opened && paired && rejectedAgentProfile && rejectedInsecureEndpoint &&
+              modal.classList.contains('hidden') && pairing.value === '';
           })()`,
         );
         console.log(ready ? 'DESKTOP_SMOKE_OK' : 'DESKTOP_SMOKE_FAILED');

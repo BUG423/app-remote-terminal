@@ -24,7 +24,7 @@ let config;
 try {
   config = loadConfig(CONFIG_PATH, { label: 'Agent configuration' });
 } catch (err) {
-  console.error('❌ Agent 配置加载失败，请根据 agent/config.json.example 创建受限权限配置。');
+  console.error('❌ Agent 配置加载失败。请先运行 node scripts/setup-agent.js，或导入服务器提供的 Agent 配对文件。');
   console.error(err.message);
   process.exit(1);
 }
@@ -245,7 +245,7 @@ function connect() {
     // code 4000 = 已有健康 Agent 占用该设备。Server 会保留先到者，当前
     // 进程低频重试；这样既不会互踢，也不会永远停在 systemd 看不出的空闲态。
     if (code === 4000) {
-      console.warn('⚠  已有另一个健康 Agent 在线（code 4000），30s 后重新检查。');
+      console.warn('⚠  这枚 agentToken 已被另一台在线电脑使用（code 4000）。请在 Relay 新增独立设备并使用它的 agentToken，或停止原电脑的 Agent；30s 后重试。');
       if (!shuttingDown) scheduleReconnect(30000);
       return;
     }

@@ -119,7 +119,7 @@ function browserTokenIsValid(value) {
 
 function requireValidBrowserToken(value) {
   if (!browserTokenIsValid(value)) {
-    throw new Error('访问 Token 必须为 32-512 个字符，且不能使用示例值');
+    throw new Error('APP 访问 Token（browserToken）必须为 32-512 个字符，且不能使用示例值');
   }
   return value;
 }
@@ -522,6 +522,7 @@ function openTerminalPage() {
 function closeDeviceModal() {
   deviceModal.classList.add('hidden');
   $('device-form-error').classList.add('hidden');
+  $('device-pairing-input').value = '';
 }
 
 function openDeviceModal(deviceId = '') {
@@ -532,14 +533,32 @@ function openDeviceModal(deviceId = '') {
   $('device-relay-input').value = device?.relayUrl || nativeDefaultRelayUrl();
   $('device-token-input').value = '';
   $('device-token-input').required = !device;
+  $('device-pairing-input').value = '';
+  $('device-pairing-details').open = false;
   $('device-token-hint').textContent = device
-    ? '留空表示继续使用已保存的 Token；输入新 Token 会安全替换。'
-    : 'Token 仅写入系统安全凭据存储，不进入普通配置。';
+    ? '留空继续使用已保存的 browserToken；输入新值会替换本机凭据。agentToken 用于远程电脑。'
+    : '从阿里云获取同一台电脑的 browserToken；agentToken 填在远程电脑上。凭据使用系统安全存储。';
   $('device-save-btn').textContent = device ? '保存并重新连接' : '保存并连接';
   $('device-form-error').classList.add('hidden');
   deviceModal.classList.remove('hidden');
   requestAnimationFrame(() => $('device-name-input').focus());
 }
+
+$('device-pairing-import').addEventListener('click', () => {
+  try {
+    const profile = PairingProfile.parseProfile($('device-pairing-input').value, 'app');
+    $('device-name-input').value = profile.name;
+    $('device-relay-input').value = profile.relayUrl;
+    $('device-token-input').value = profile.browserToken;
+    $('device-pairing-input').value = '';
+    $('device-pairing-details').open = false;
+    $('device-form-error').classList.add('hidden');
+    showToast('配对信息已填入，点击保存并连接');
+  } catch (error) {
+    $('device-form-error').textContent = error.message;
+    $('device-form-error').classList.remove('hidden');
+  }
+});
 
 function openDeviceDelete(deviceId) {
   const device = deviceRegistry.get(deviceId);
@@ -620,7 +639,9 @@ function updateMobileOverview() {
     ? '点此添加并选择设备'
     : STATE.agentOnline
     ? `${runningCount} 个会话正在运行`
-    : '点此查看设备或重新连接';
+    : STATE.authenticated
+    ? '阿里云中转已连接，等待远程电脑启动 Agent'
+    : '尚未连接阿里云中转，点此检查地址和 APP Token';
   $('mobile-agent-dot').className = `status-dot ${STATE.agentOnline ? 'online' : 'offline'}`;
   mobileAgentBanner.classList.toggle('online', STATE.agentOnline);
 
@@ -1035,8 +1056,11 @@ function handleMessage(data) {
     case 'error':
       if (!STATE.authenticated) {
         wsClient.disableReconnect();
-        const message = cleanClientText(data.message, '设备认证失败，请检查 Token', 1000);
-        const tokenRejected = /invalid token/i.test(message);
+        const serverMessage = cleanClientText(data.message, '设备认证失败，请检查 APP 访问 Token', 1000);
+        const tokenRejected = /invalid token/i.test(serverMessage);
+        const message = tokenRejected
+          ? 'APP 访问 Token 无效。请填写这台电脑的 browserToken，并确认阿里云配置已生效。'
+          : serverMessage;
         if (tokenRejected) {
           clearDeviceToken(activeDeviceId());
           activeDeviceToken = '';

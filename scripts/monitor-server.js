@@ -62,6 +62,7 @@ function requestStatus(client, options, timeoutMs = 4000) {
     const finish = (value) => {
       if (settled) return;
       settled = true;
+      clearTimeout(deadline);
       resolve(value);
     };
     const req = client.request(options, (res) => {
@@ -69,6 +70,8 @@ function requestStatus(client, options, timeoutMs = 4000) {
       finish({ ok: res.statusCode >= 200 && res.statusCode < 400, statusCode: res.statusCode });
     });
     req.setTimeout(timeoutMs, () => req.destroy(new Error('request timeout')));
+    // Socket timeouts do not cover every DNS/connect stall. Bound the whole probe.
+    const deadline = setTimeout(() => req.destroy(new Error('request deadline exceeded')), timeoutMs);
     req.on('error', (err) => finish({ ok: false, error: err.message }));
     req.end();
   });
@@ -103,7 +106,7 @@ function pinnedLocalTlsOptions(config) {
   };
 }
 
-async function checkInternalHealth(config, host, port) {
+async function checkInternalHealth(config, host, port, timeoutMs = 4000) {
   const useTls = config.useTLS === true;
   const client = useTls ? https : http;
   const options = {
@@ -113,10 +116,10 @@ async function checkInternalHealth(config, host, port) {
     method: 'GET',
     ...(useTls ? pinnedLocalTlsOptions(config) : {}),
   };
-  const first = await requestStatus(client, options);
+  const first = await requestStatus(client, options, timeoutMs);
   if (first.ok) return first;
   await sleep(750);
-  return requestStatus(client, options);
+  return requestStatus(client, options, timeoutMs);
 }
 
 function checkLocalTls(host, port) {
@@ -171,7 +174,7 @@ function checkRemoteAgent(config, device, timeoutMs = 5000) {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
-      try { ws.close(1000, 'monitor complete'); } catch {}
+      try { ws.terminate(); } catch {}
       resolve(result);
     };
     const timer = setTimeout(() => finish({ ok: false, online: false, error: 'authentication timeout' }), timeoutMs);
@@ -342,7 +345,10 @@ async function main() {
   writeStatus(statePath, status);
 
   const summary = `level=${status.level} remoteAgent=${remoteAgent.online ? 'online' : 'offline'} sessions=${remoteAgent.sessions || 0} load1=${metrics.load1} memAvailableMB=${metrics.memoryAvailableMb} diskUsed=${metrics.diskUsedPercent}% actions=${actions.length}`;
-  if (errors.length > 0) console.error(`[monitor] CRITICAL ${summary} errors=${errors.join('; ')}`);
+  if (errors.length > 0) {
+    console.error(`[monitor] CRITICAL ${summary} errors=${errors.join('; ')}`);
+    process.exitCode = 1;
+  }
   else if (warnings.length > 0) console.warn(`[monitor] WARNING ${summary} warnings=${warnings.join('; ')}`);
   else console.log(`[monitor] OK ${summary}`);
 }
@@ -355,6 +361,8 @@ if (require.main === module) {
 }
 
 module.exports = {
+  checkInternalHealth,
+  checkRemoteAgent,
   collectResourceWarnings,
   envFlag,
   pinnedLocalTlsOptions,

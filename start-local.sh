@@ -26,5 +26,16 @@ echo "Working directory: ${PWD}"
 echo "Node: $(node --version)"
 echo "Config: ${CONFIG_PATH}"
 
-npm ci --prefix "${SCRIPT_DIR}/agent" --no-audit --no-fund
+# Reconnecting an installed Agent must not download/rebuild node-pty each time.
+if ! node - "${SCRIPT_DIR}/agent/package.json" <<'NODE'
+try {
+  const { createRequire } = require('node:module');
+  const load = createRequire(process.argv[2]);
+  for (const dependency of Object.keys(load('./package.json').dependencies)) load(dependency);
+} catch { process.exit(1); }
+NODE
+then
+  echo "Installing missing Agent dependencies..."
+  npm ci --prefix "${SCRIPT_DIR}/agent" --no-audit --no-fund
+fi
 exec env NODE_ENV=production CW_CONFIG_PATH="${CONFIG_PATH}" node "${SCRIPT_DIR}/agent/index.js"

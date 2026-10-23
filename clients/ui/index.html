@@ -129,7 +129,7 @@
         <div id="device-empty" class="device-empty hidden">
           <div class="device-empty-icon">＋</div>
           <h2>添加第一台设备</h2>
-          <p>进入软件无需先登录。请在这里保存中转域名和 Token，随后即可在“终端”页查看该设备的会话。</p>
+          <p>每台远程电脑添加一次：填写阿里云中转地址和该电脑的 APP 访问 Token，或粘贴 APP 配对配置。本机只需运行这个 APP。</p>
           <button id="device-empty-add" class="primary" type="button">添加设备</button>
         </div>
       </div>
@@ -207,10 +207,15 @@
   <div id="device-modal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="device-modal-title">
     <form id="device-form" class="modal-card device-form" autocomplete="off">
       <div class="modal-heading"><h3 id="device-modal-title">添加设备</h3><button id="device-modal-close" class="modal-close" type="button" aria-label="关闭">×</button></div>
+      <details id="device-pairing-details">
+        <summary>粘贴 APP 配对配置，自动填写</summary>
+        <label class="form-field"><span>APP 配对配置</span><textarea id="device-pairing-input" rows="4" maxlength="16384" placeholder="粘贴服务器生成的 APP 配对 JSON" autocomplete="off" spellcheck="false"></textarea></label>
+        <button id="device-pairing-import" class="ghost" type="button">填入设备信息</button>
+      </details>
       <input id="device-edit-id" type="hidden">
       <label class="form-field"><span>设备名称</span><input id="device-name-input" type="text" maxlength="80" placeholder="例如：生产服务器" autocomplete="off" required></label>
       <label class="form-field"><span>中转域名或地址</span><input id="device-relay-input" type="text" maxlength="2048" inputmode="url" placeholder="webclaude.xmu-zss.cn" autocomplete="url" required><small>默认使用安全的 WSS；也可填写完整的 wss:// 地址。</small></label>
-      <label class="form-field"><span>访问 Token</span><input id="device-token-input" type="password" minlength="32" maxlength="512" placeholder="输入该设备的浏览器 Token" autocomplete="new-password"><small id="device-token-hint">Token 仅写入系统安全凭据存储，不进入普通配置。</small></label>
+      <label class="form-field"><span>APP 访问 Token（browserToken）</span><input id="device-token-input" type="password" minlength="32" maxlength="512" placeholder="填写该电脑的 browserToken" autocomplete="new-password"><small id="device-token-hint">从阿里云获取同一台电脑的 browserToken；agentToken 填在远程电脑上。</small></label>
       <p id="device-form-error" class="error-msg hidden"></p>
       <div class="modal-actions"><button id="device-modal-cancel" class="ghost" type="button">取消</button><button id="device-save-btn" class="primary" type="submit">保存并连接</button></div>
     </form>
@@ -254,6 +259,7 @@
   <script src="./terminal-stream.js?v=20260809b"></script>
   <script src="./client-settings.js?v=20260809b"></script>
   <script src="./device-store.js?v=20260809a"></script>
+  <script src="./pairing-profile.js?v=20261023a"></script>
   <script src="./app.js?v=20260809e"></script>
 </body>
 </html>

@@ -10,7 +10,7 @@ SERVER_USER="${SERVER_USER:-root}"
 SERVER_SSH_PORT="${SERVER_SSH_PORT:-22}"
 REMOTE_DIR="${REMOTE_DIR:-/opt/remote-terminal}"
 DEPLOY_BRANCH="${DEPLOY_BRANCH:-main}"
-REMOTE_CONFIG_PATH="${REMOTE_CONFIG_PATH:-${REMOTE_DIR}/config.json}"
+REMOTE_CONFIG_PATH="${REMOTE_CONFIG_PATH:-/etc/remote-terminal/server.json}"
 SERVER_SERVICE="${SERVER_SERVICE:-remote-terminal-server.service}"
 
 fail() {
@@ -28,7 +28,7 @@ fail() {
 [[ "${REMOTE_CONFIG_PATH}" =~ ^/[A-Za-z0-9._/-]+$ ]] || fail "REMOTE_CONFIG_PATH must be a simple absolute path"
 [[ "${SERVER_SERVICE}" =~ ^[A-Za-z0-9_.@-]+$ ]] || fail "invalid SERVER_SERVICE"
 
-SSH=(ssh -o StrictHostKeyChecking=accept-new -p "${SERVER_SSH_PORT}")
+SSH=(ssh -o StrictHostKeyChecking=accept-new -o BatchMode=yes -o ConnectTimeout=10 -o ServerAliveInterval=15 -o ServerAliveCountMax=2 -p "${SERVER_SSH_PORT}")
 TARGET="${SERVER_USER}@${SERVER_HOST}"
 
 echo "Updating ${TARGET}:${REMOTE_DIR} from origin/${DEPLOY_BRANCH}"
@@ -89,7 +89,7 @@ HEALTH_HOST="${BIND_HOST}"
 [[ "${HEALTH_HOST}" == "0.0.0.0" ]] && HEALTH_HOST="127.0.0.1"
 [[ "${HEALTH_HOST}" == "::" ]] && HEALTH_HOST="[::1]"
 HEALTH_SCHEME="http"
-CURL_HEALTH=(curl --fail --silent)
+CURL_HEALTH=(curl --fail --silent --connect-timeout 2 --max-time 3)
 if [[ "${USE_TLS}" == "1" ]]; then
   HEALTH_SCHEME="https"
   # 仅对本机回环健康检查跳过域名匹配；公网证书由独立监控严格校验。

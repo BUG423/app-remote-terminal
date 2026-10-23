@@ -1,6 +1,12 @@
 node_modules/
 config.json
 .env
+# Device pairing exports and credential backups must stay out of Git.
+pairing/
+*.agent.json
+*.app.json
+*.json.*.bak
+*.json.*.tmp
 *.log
 .claude/
 .tools/

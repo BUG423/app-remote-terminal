@@ -415,7 +415,7 @@ svg { width: 1.25em; height: 1.25em; fill: none; stroke: currentColor; stroke-wi
 .danger-text { color: var(--danger) !important; }
 .settings-card { width: min(470px, 100%); }
 .form-field { display: flex; flex-direction: column; gap: 7px; margin: 14px 0; color: var(--text); font-size: 13px; }
-.form-field input {
+.form-field input, .form-field textarea {
   width: 100%;
   min-height: 44px;
   padding: 10px 12px;
@@ -425,7 +425,8 @@ svg { width: 1.25em; height: 1.25em; fill: none; stroke: currentColor; stroke-wi
   border-radius: 9px;
   outline: none;
 }
-.form-field input:focus { border-color: var(--accent); box-shadow: 0 0 0 3px rgba(47, 129, 247, .12); }
+.form-field input:focus, .form-field textarea:focus { border-color: var(--accent); box-shadow: 0 0 0 3px rgba(47, 129, 247, .12); }
+.form-field textarea { width: 100%; resize: vertical; font-family: var(--font-mono, monospace); }
 .form-field small { color: var(--text-muted); line-height: 1.45; }
 .device-form { width: min(500px, 100%); }
 .setting-row { display: flex; align-items: center; justify-content: space-between; gap: 18px; min-height: 46px; margin: 7px 0; font-size: 14px; }
@@ -769,7 +770,7 @@ svg { width: 1.25em; height: 1.25em; fill: none; stroke: currentColor; stroke-wi
   .device-empty-icon { color: var(--accent-strong); background: #e4efff; }
   .device-empty h2 { color: var(--mobile-text); }
   .form-field { color: var(--mobile-text); }
-  .form-field input { color: var(--mobile-text); background: #f3f4f6; border-color: transparent; }
+  .form-field input, .form-field textarea { color: var(--mobile-text); background: #f3f4f6; border-color: transparent; }
   .form-field small { color: var(--mobile-muted); }
 
   #mobile-tabbar {
