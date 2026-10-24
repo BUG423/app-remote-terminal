@@ -6,7 +6,7 @@
   "scripts": {
     "agent:setup": "node scripts/setup-agent.js",
     "devices": "node scripts/manage-devices.js",
-    "test": "node tests/project-files.test.js && node tests/client-packaging.test.js && node tests/client-settings.test.js && node tests/device-store.test.js && node tests/auth.test.js && node tests/rate-limiter.test.js && node tests/agent-hardening.test.js && node tests/monitor.test.js && node tests/onboarding.test.js && node tests/terminal-state.test.js && node tests/browser-stream.test.js && node tests/server-tls.test.js && node tests/server-protocol.test.js",
+    "test": "node tests/project-files.test.js && node tests/client-packaging.test.js && node tests/client-settings.test.js && node tests/device-store.test.js && node tests/auth.test.js && node tests/rate-limiter.test.js && node tests/agent-hardening.test.js && node tests/monitor.test.js && node tests/onboarding.test.js && node tests/terminal-state.test.js && node tests/browser-stream.test.js && node tests/server-tls.test.js && node tests/server-protocol.test.js && node tests/relay-exec.test.js",
     "test:security": "node tests/security.js",
     "test:e2e": "node tests/e2e.js",
     "test:latency": "node tests/latency-benchmark.js"

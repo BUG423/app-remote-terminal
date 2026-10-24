@@ -131,6 +131,19 @@ node /项目路径/scripts/setup-agent.js --profile /私密路径/office-pc.agen
 - **Invalid token**：Agent 使用 `agentToken`，APP 使用 `browserToken`；修改服务器配置后需重启 Relay。
 - **配置中的运行身份不符**：回到向导绑定的工作目录，用同一账户启动，或在新目录重新运行向导。
 
+### 直接从控制终端执行命令
+
+安装过 Relay 或 Agent 依赖的控制端可跳过桌面 APP，通过同一份私密 APP 配对文件执行：
+
+```bash
+node scripts/relay-exec.js --profile /私密路径/office-pc.app.json \
+  --command 'hostname; pwd' --timeout 90
+# 多行或较长的命令使用 --command-file /路径/command.sh
+```
+
+命令在远程 Agent 的新终端执行。CLI 输出包含退出码与终端输出的 JSON，等待临时会话删除确认后退出。
+长命令分段发送，Token 不放进命令行；该流程无需在控制端启动 Agent。
+
 下面是首次部署 Relay 和手动配置 Agent 的底层步骤。
 
 ### 1. 中继服务配置 (Relay)
