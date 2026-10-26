@@ -180,6 +180,34 @@ test('旧聊天协议、原始按键审计和 PM2 回退代码均已删除', () 
   assert(!combined.includes('pm2'));
 });
 
+test('公开文件不包含高风险凭据或内部连接路径', () => {
+  const listed = spawnSync('git', ['ls-files', '-z'], { cwd: root, encoding: 'buffer' });
+  assert.equal(listed.status, 0, listed.stderr?.toString());
+  const names = listed.stdout.toString('utf8').split('\0').filter(Boolean);
+  const patterns = [
+    /-----BEGIN [A-Z ]*PRIVATE KEY-----/,
+    /\bAKIA[0-9A-Z]{16}\b/,
+    /\bgh[pousr]_[A-Za-z0-9_]{20,}\b/,
+    /\bsk-[A-Za-z0-9]{20,}\b/,
+    /\bLTAI[A-Za-z0-9]{16,}\b/,
+    /\/(?:home|Users)\/[A-Za-z0-9._-]+\/(?:\.ssh|\.config|workspace|RAL)\//,
+    /\/root\/(?:autodl-tmp|miniconda\d*|anaconda\d*)\//,
+    /connect\.[a-z0-9]+\.seetacloud\.com/,
+  ];
+  const hits = [];
+  for (const name of names) {
+    if (/(^|\/)(?:pairing\/|\.ssh\/|\.env(?:\.(?!example$)[^/]+)?$|config\.json$)|\.(?:agent|app)\.json$|\.(?:key|pem|p12|jks|keystore)$/.test(name)) {
+      hits.push(name);
+      continue;
+    }
+    const bytes = fs.readFileSync(path.join(root, name));
+    if (bytes.includes(0)) continue;
+    const text = bytes.toString('utf8');
+    if (patterns.some((pattern) => pattern.test(text))) hits.push(name);
+  }
+  assert.deepEqual(hits, [], `sensitive pattern found in: ${hits.join(', ')}`);
+});
+
 const passed = results.filter(Boolean).length;
 console.log(`\n${passed}/${results.length} 项目文件检查通过`);
 if (passed !== results.length) process.exit(1);
