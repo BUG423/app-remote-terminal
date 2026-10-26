@@ -17,7 +17,9 @@ boundaries and keep credentials outside the repository.
 
 ```bash
 npm test
-npm run test:security
+# Creates a temporary loopback Relay and Agent, runs integration/security tests,
+# then removes those test processes and files.
+bash scripts/run-server-tests.sh
 ```
 
 When a change affects a native client, Relay protocol or deployment unit, run the
